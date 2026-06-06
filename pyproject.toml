@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qortium-cli"
+version = "0.2.0"
+description = "Qortium/Qortal terminal toolbox"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "bcrypt>=4.1.0",
+  "colorama>=0.4.6",
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
+
+[project.scripts]
+qortium-cli = "qortium_cli.entrypoint:main"
+qortium-submit-tx = "qortium_cli.tx_submitter:main"
+qortium-build-tx = "qortium_cli.tx_builder:main"
+
+[tool.setuptools]
+packages = ["qortium_cli"]
