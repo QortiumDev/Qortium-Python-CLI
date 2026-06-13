@@ -11,7 +11,9 @@ from qortium_cli.models import AccountSettings, AppContext, ChatSettings, Endpoi
 from qortium_cli.tools import (
     _editable_chat_threads,
     _normalize_chat_message_input,
+    _replyable_chat_threads,
     _run_chat_edit_command,
+    _run_chat_reply_command,
     _send_chat_message,
 )
 
@@ -88,6 +90,59 @@ class ChatCommandTests(TestCase):
         self.assertEqual(len(editable), 1)
         self.assertEqual(editable[0].original["signature"], "sig-own")
         self.assertEqual(editable[0].latest["signature"], "sig-own-edit")
+
+    def test_replyable_chat_threads_include_confirmed_messages_with_signatures(self) -> None:
+        own = message(signature="sig-own", data=base64_text("own"))
+        other = message(
+            sender="QotherAddress111111111111111111111111",
+            senderName="Other",
+            signature="sig-other",
+            data=base64_text("other"),
+        )
+        unsigned = message(signature="", data=base64_text("unsigned"))
+        pending = message(signature="sig-pending", _unconfirmed=True)
+
+        replyable = _replyable_chat_threads([own, other, unsigned, pending])
+
+        self.assertEqual([thread.original["signature"] for thread in replyable], ["sig-own", "sig-other"])
+
+    def test_run_chat_reply_command_submits_reply_envelope(self) -> None:
+        ctx = make_context()
+        target = message(
+            sender="QotherAddress111111111111111111111111",
+            senderName="Other",
+            data=base64_text("target text"),
+            signature="sig-target",
+        )
+
+        with (
+            patch("qortium_cli.tools.read_menu_choice", return_value="1"),
+            patch("qortium_cli.tools.prompt_str", return_value="reply body"),
+            patch("qortium_cli.tools._send_chat_message", return_value={"signature": "sig-reply"}) as send,
+        ):
+            with redirect_stdout(io.StringIO()):
+                result = _run_chat_reply_command(ctx, [target])
+
+        self.assertEqual(result, {"signature": "sig-reply"})
+        send.assert_called_once()
+        _, message_text = send.call_args.args
+        self.assertEqual(send.call_args.kwargs, {})
+        self.assertEqual(json.loads(message_text), {"message": "reply body", "repliedTo": "sig-target"})
+
+    def test_run_chat_reply_command_blank_input_cancels(self) -> None:
+        ctx = make_context()
+        target = message(signature="sig-target", data=base64_text("target text"))
+
+        with (
+            patch("qortium_cli.tools.read_menu_choice", return_value="1"),
+            patch("qortium_cli.tools.prompt_str", return_value=""),
+            patch("qortium_cli.tools._send_chat_message") as send,
+        ):
+            with redirect_stdout(io.StringIO()):
+                result = _run_chat_reply_command(ctx, [target])
+
+        self.assertIsNone(result)
+        send.assert_not_called()
 
     def test_run_chat_edit_command_submits_reference_and_preserves_reply(self) -> None:
         ctx = make_context()

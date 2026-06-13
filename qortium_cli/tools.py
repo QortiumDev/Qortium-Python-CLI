@@ -248,11 +248,56 @@ def _normalize_chat_message_input(raw: str) -> str:
 
 def _print_chat_command_help() -> None:
     print_section("Chat Commands")
+    print("/reply  Reply to a recent message.")
     print("/edit   Edit one of your own recent text messages.")
     print("/help   Show this help.")
     print("/?      Show this help.")
     print("/quit   Leave chat.")
     print("//text  Send a message that starts with /.")
+
+
+def _replyable_chat_threads(messages: List[Dict[str, Any]]) -> List[MessageThread]:
+    replyable: List[MessageThread] = []
+    for thread in build_message_threads(messages):
+        original = dict(thread.original)
+        if not _chat_message_signature(original):
+            continue
+        if bool(original.get("_unconfirmed", False)):
+            continue
+        replyable.append(thread)
+    return replyable
+
+
+def _format_replyable_chat_thread(thread: MessageThread) -> str:
+    timestamp = _format_chat_timestamp(thread.original.get("timestamp"))
+    sender = _chat_sender_label(dict(thread.original))
+    snippet = _chat_message_snippet(thread)
+    edited_label = " [edited]" if thread.revisions else ""
+    return f"{timestamp} - {sender}: {snippet}{edited_label}"
+
+
+def _select_replyable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThread | None:
+    replyable = _replyable_chat_threads(messages)
+    if not replyable:
+        warn("No replyable messages found in the current chat history.")
+        return None
+
+    print_section("Reply To")
+    for index, thread in enumerate(replyable, start=1):
+        print_option(str(index), _format_replyable_chat_thread(thread))
+    print_option("0", "Cancel")
+
+    while True:
+        choice = read_menu_choice("Choose message to reply to: ")
+        if choice == "0":
+            return None
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            return replyable[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
 
 
 def _editable_chat_threads(ctx: AppContext, messages: List[Dict[str, Any]]) -> List[MessageThread]:
@@ -301,6 +346,27 @@ def _select_editable_chat_thread(ctx: AppContext, messages: List[Dict[str, Any]]
             return editable[selected_index]
         except (ValueError, IndexError):
             warn("Unknown option.")
+
+
+def _run_chat_reply_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> Any | None:
+    thread = _select_replyable_chat_thread(messages)
+    if not thread:
+        return None
+
+    print()
+    print("Replying to:")
+    print(f"  {_chat_sender_label(dict(thread.original))}: {_chat_message_snippet(thread)}")
+    reply = prompt_str("Reply message (Enter to cancel): ", "").strip()
+    if not reply:
+        warn("Reply cancelled.")
+        return None
+
+    target_signature = _chat_message_signature(dict(thread.original))
+    message_text = build_chat_message_text(
+        _normalize_chat_message_input(reply),
+        target_signature,
+    )
+    return _send_chat_message(ctx, message_text)
 
 
 def _run_chat_edit_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> Any | None:
@@ -834,6 +900,25 @@ def run_chat_room(ctx: AppContext) -> None:
         if command in {"/help", "/?"}:
             _print_chat_command_help()
             pause()
+            continue
+        if command == "/reply":
+            try:
+                result = _run_chat_reply_command(ctx, messages)
+                if result is None:
+                    pause()
+                    continue
+                ok("Chat reply submitted.")
+                if ctx.debug:
+                    print("Process response: " + str(result))
+                input("Press Enter to refresh chat...")
+            except Exception as exc:
+                error("Failed to reply to chat message:")
+                if _is_node_unreachable_error(exc):
+                    _print_node_unreachable_hint(ctx)
+                else:
+                    print(pretty_exception(exc))
+                    _print_debug_traceback(ctx, exc)
+                pause()
             continue
         if command == "/edit":
             try:
