@@ -268,36 +268,87 @@ def _replyable_chat_threads(messages: List[Dict[str, Any]]) -> List[MessageThrea
     return replyable
 
 
+def _chat_thread_timestamp(thread: MessageThread) -> int:
+    try:
+        return int(thread.original.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _replyable_chat_user_groups(
+    messages: List[Dict[str, Any]],
+) -> List[tuple[str, str, List[MessageThread]]]:
+    groups: Dict[str, List[MessageThread]] = {}
+    labels: Dict[str, str] = {}
+
+    for thread in _replyable_chat_threads(messages):
+        original = dict(thread.original)
+        key = _chat_message_sender(original) or _chat_sender_label(original)
+        groups.setdefault(key, []).append(thread)
+        labels.setdefault(key, _chat_sender_label(original))
+
+    user_groups: List[tuple[str, str, List[MessageThread]]] = []
+    for key, threads in groups.items():
+        threads.sort(key=_chat_thread_timestamp, reverse=True)
+        user_groups.append((key, labels[key], threads))
+
+    user_groups.sort(key=lambda group: _chat_thread_timestamp(group[2][0]), reverse=True)
+    return user_groups
+
+
+def _format_replyable_chat_user(label: str, threads: List[MessageThread]) -> str:
+    count = len(threads)
+    count_label = "1 message" if count == 1 else f"{count} messages"
+    return f"{label} ({count_label}) - latest: {_chat_message_snippet(threads[0])}"
+
+
 def _format_replyable_chat_thread(thread: MessageThread) -> str:
     timestamp = _format_chat_timestamp(thread.original.get("timestamp"))
-    sender = _chat_sender_label(dict(thread.original))
     snippet = _chat_message_snippet(thread)
     edited_label = " [edited]" if thread.revisions else ""
-    return f"{timestamp} - {sender}: {snippet}{edited_label}"
+    return f"{timestamp} - {snippet}{edited_label}"
 
 
 def _select_replyable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThread | None:
-    replyable = _replyable_chat_threads(messages)
-    if not replyable:
+    user_groups = _replyable_chat_user_groups(messages)
+    if not user_groups:
         warn("No replyable messages found in the current chat history.")
         return None
 
-    print_section("Reply To")
-    for index, thread in enumerate(replyable, start=1):
-        print_option(str(index), _format_replyable_chat_thread(thread))
-    print_option("0", "Cancel")
-
     while True:
-        choice = read_menu_choice("Choose message to reply to: ")
+        print_section("Reply Sender")
+        for index, (_, label, threads) in enumerate(user_groups, start=1):
+            print_option(str(index), _format_replyable_chat_user(label, threads))
+        print_option("0", "Cancel")
+
+        choice = read_menu_choice("Choose sender to reply to: ")
         if choice == "0":
             return None
         try:
             selected_index = int(choice) - 1
             if selected_index < 0:
                 raise IndexError
-            return replyable[selected_index]
+            _, label, sender_threads = user_groups[selected_index]
         except (ValueError, IndexError):
             warn("Unknown option.")
+            continue
+
+        print_section(f"Messages From {label}")
+        for index, thread in enumerate(sender_threads, start=1):
+            print_option(str(index), _format_replyable_chat_thread(thread))
+        print_option("0", "Back")
+
+        while True:
+            choice = read_menu_choice("Choose message to reply to: ")
+            if choice == "0":
+                break
+            try:
+                selected_index = int(choice) - 1
+                if selected_index < 0:
+                    raise IndexError
+                return sender_threads[selected_index]
+            except (ValueError, IndexError):
+                warn("Unknown option.")
 
 
 def _editable_chat_threads(ctx: AppContext, messages: List[Dict[str, Any]]) -> List[MessageThread]:

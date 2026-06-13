@@ -12,6 +12,7 @@ from qortium_cli.tools import (
     _editable_chat_threads,
     _normalize_chat_message_input,
     _replyable_chat_threads,
+    _replyable_chat_user_groups,
     _run_chat_edit_command,
     _run_chat_reply_command,
     _send_chat_message,
@@ -106,6 +107,33 @@ class ChatCommandTests(TestCase):
 
         self.assertEqual([thread.original["signature"] for thread in replyable], ["sig-own", "sig-other"])
 
+    def test_replyable_chat_user_groups_sort_by_latest_sender_message(self) -> None:
+        old_own = message(
+            signature="sig-own-old",
+            data=base64_text("old own"),
+            timestamp=10,
+        )
+        recent_own = message(
+            signature="sig-own-recent",
+            data=base64_text("recent own"),
+            timestamp=30,
+        )
+        other = message(
+            sender="QotherAddress111111111111111111111111",
+            senderName="Other",
+            signature="sig-other",
+            data=base64_text("other"),
+            timestamp=20,
+        )
+
+        groups = _replyable_chat_user_groups([old_own, other, recent_own])
+
+        self.assertEqual([label for _, label, _ in groups], [make_context().account.account_address, "Other"])
+        self.assertEqual(
+            [thread.original["signature"] for thread in groups[0][2]],
+            ["sig-own-recent", "sig-own-old"],
+        )
+
     def test_run_chat_reply_command_submits_reply_envelope(self) -> None:
         ctx = make_context()
         target = message(
@@ -116,7 +144,7 @@ class ChatCommandTests(TestCase):
         )
 
         with (
-            patch("qortium_cli.tools.read_menu_choice", return_value="1"),
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1"]),
             patch("qortium_cli.tools.prompt_str", return_value="reply body"),
             patch("qortium_cli.tools._send_chat_message", return_value={"signature": "sig-reply"}) as send,
         ):
@@ -134,7 +162,7 @@ class ChatCommandTests(TestCase):
         target = message(signature="sig-target", data=base64_text("target text"))
 
         with (
-            patch("qortium_cli.tools.read_menu_choice", return_value="1"),
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1"]),
             patch("qortium_cli.tools.prompt_str", return_value=""),
             patch("qortium_cli.tools._send_chat_message") as send,
         ):
