@@ -29,6 +29,18 @@ pipx install "git+https://github.com/QortiumDev/Qortium-Python-CLI.git"
 pipx upgrade qortium-cli
 ```
 
+### Startup Update Checks
+
+On interactive startup, the CLI checks the GitHub releases page at most once per
+day and lets you know when a newer release is available.
+
+- The newest stable release is shown when it is newer than the installed CLI.
+- A prerelease is shown first only when it is newer than both the installed CLI
+  and the newest stable release.
+- A prerelease is not offered when the newest stable release is newer.
+
+Set `QORTIUM_CLI_NO_UPDATE_CHECK=1` before launch to skip startup update checks.
+
 ## 3) Start The App
 
 ```bash
@@ -42,13 +54,33 @@ On first launch, setup asks for:
 1. Endpoint URL (default: `http://127.0.0.1:24891`)
 2. Timeout seconds
 3. API key
-4. Wallet key: Base58 private key or seed phrase
+4. Wallet key: Base58 private key, seed phrase, existing wallet file, or new
+   encrypted wallet file
 
 Then it auto-fills:
 
 - public key
 - account address
 - display name (primary name if available)
+
+For an existing Qortium Home wallet file, choose `Use wallet file`, enter the JSON
+backup path, then enter the wallet password. Version 2 master-seed wallets use
+address `0`; version 3 private-key wallets use the stored private key directly.
+
+To create a new account, choose `New wallet file`, enter and confirm a
+wallet password, then choose where to save the JSON backup. The CLI creates an
+encrypted version 2 master-seed wallet compatible with Qortium Home, uses address
+`0` for CLI setup, and keeps the password out of the CLI config. Keep the wallet
+file and password; the master-seed wallet can derive additional addresses later.
+
+The endpoint URL is checked with `/admin/status` when selected. If the node is not
+connected or does not return node status, setup lets you enter a different endpoint
+or continue with the selected endpoint anyway.
+
+When the selected endpoint is local, the CLI tries to detect a running
+Qortium/Qortal Core process and read its `apikey.txt`. If exactly one matching
+local Core API key is found, setup offers it as the default without printing the
+key; press Enter at the API-key prompt to use it.
 
 ## 5) Runtime Settings Files
 
@@ -67,10 +99,16 @@ Optional custom location:
 
 - set `QORTIUM_CLI_HOME=/path/to/folder` before launch
 
-## 6) Reconfigure Or Reset
+## 6) Reconfigure Or Run Setup
 
-- Choose menu option `9` to change the endpoint URL, request timeout, API key,
-  or wallet key independently.
+- Choose main menu option `9` to change the endpoint URL, request timeout,
+  API key, or wallet key independently.
+- Inside reconfigure, choose option `9` (`Run initial setup`) to run the
+  initial setup flow again, then return to the main menu.
+- Endpoint URL changes run the same connection check and can be retried or kept
+  anyway if the node is offline.
+- API key changes also look for a matching local Core `apikey.txt`; when one is
+  found, press Enter to use it or type a different key.
 - Changing the API key does not ask for, replace, or re-derive your private key.
 - Delete the runtime settings files above to run first-time setup again.
 
@@ -78,7 +116,9 @@ Optional custom location:
 
 - `qortium-cli: command not found`: open a new terminal after `pipx ensurepath`, or add pipx bin dir to `PATH`.
 - Cannot reach node/API: verify your node is running and listening on `127.0.0.1:24891`.
-- API key prompt blocks setup: enter a valid `X-API-KEY`; in the reconfigure menu, press Enter to cancel without changing it.
+- API key prompt blocks setup: enter a valid `X-API-KEY`; if local Core detection
+  finds a key, press Enter to use it. In the reconfigure menu, type `/cancel` to
+  cancel a detected-key prompt without changing it.
 
 ## 8) Sign And Submit Raw Transactions
 
@@ -185,7 +225,14 @@ The main menu is organized as:
 4. `Register Name`
 5. `Wallet`
 6. `QDN Resources`
+8. `Help/Info`
 9. `Reconfigure endpoint/config`
+
+`Register Name` checks the configured wallet for existing registered names first.
+If none are found, it opens the normal registration prompt. If names already
+exist, it lists them and lets you choose `Update name` or `New name`; choose `0`
+to go back. At the register-name prompt, press Enter without typing a name to
+cancel.
 
 The Groups menu contains:
 

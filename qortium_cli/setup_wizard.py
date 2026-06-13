@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from qortium_cli.constants import C_TEXT, RESET
+from qortium_cli.core_detection import detect_local_core_api_key
 from qortium_cli.crypto import derive_private_key_from_seed_phrase
 from qortium_cli.models import AccountSettings, AppContext, EndpointSettings
 from qortium_cli.services import (
+    check_node_connection,
     qortal_address_from_public,
     qortal_primary_name_for_address,
     qortal_public_key_from_private,
@@ -25,6 +27,13 @@ from qortium_cli.ui import (
     warn,
 )
 from qortium_cli.validators import is_placeholder, normalize_node_url
+from qortium_cli.wallet_backup import (
+    default_wallet_backup_path,
+    generate_new_wallet_backup,
+    normalize_wallet_file_path,
+    private_key_from_wallet_file,
+    write_wallet_backup,
+)
 
 
 def current_endpoint_values_ready(ctx: AppContext) -> bool:
@@ -52,16 +61,49 @@ def _prompt_private_key() -> str:
     print()
     print_option("1", "Use private key")
     print_option("2", "Use seed phrase")
-    mode = read_menu_choice("Choose key input mode [1/2]: ").strip() or "1"
-    if mode not in {"1", "2"}:
+    print_option("3", "Use wallet file")
+    print_option("4", "New wallet file")
+    mode = read_menu_choice("Choose key input mode [1/2/3/4]: ").strip() or "1"
+    if mode not in {"1", "2", "3", "4"}:
         mode = "1"
 
     if mode == "1":
         private_key = prompt_secret("Private key: ").strip()
-    else:
+    elif mode == "2":
         seed_phrase = prompt_secret("Seed phrase: ").strip()
         private_key = derive_private_key_from_seed_phrase(seed_phrase)
         ok("Derived private key from seed phrase.")
+    elif mode == "3":
+        raw_wallet_path = prompt_str("Wallet file path: ")
+        if not raw_wallet_path.strip():
+            raise RuntimeError("Wallet file path is empty.")
+        wallet_path = normalize_wallet_file_path(raw_wallet_path)
+        wallet_password = prompt_secret("Wallet password: ")
+        private_key = private_key_from_wallet_file(wallet_path, wallet_password)
+        ok("Unlocked Qortium Home wallet file.")
+    elif mode == "4":
+        wallet_password = prompt_secret("New wallet password: ")
+        confirm_password = prompt_secret("Confirm wallet password: ")
+        if wallet_password != confirm_password:
+            raise RuntimeError("Wallet passwords do not match.")
+        generated_wallet = generate_new_wallet_backup(wallet_password)
+        wallet_name = prompt_str("Wallet name [wallet]: ", "wallet").strip() or "wallet"
+        default_path = default_wallet_backup_path(
+            generated_wallet.address,
+            wallet_name=wallet_name,
+        )
+        raw_output_path = prompt_str(
+            f"Wallet backup path [{default_path}]: ",
+            str(default_path),
+        )
+        output_path = write_wallet_backup(
+            normalize_wallet_file_path(raw_output_path),
+            generated_wallet.wallet,
+        )
+        ok("Created encrypted Qortium Home wallet file.")
+        print(C_TEXT + f"Wallet file: {output_path}" + RESET)
+        print(C_TEXT + f"Account: {generated_wallet.address}" + RESET)
+        private_key = generated_wallet.private_key
 
     if not private_key:
         raise RuntimeError("Private key is empty.")
@@ -93,6 +135,71 @@ def _account_from_private_key(ctx: AppContext, private_key: str, api_key: str) -
     )
 
 
+def _confirm_endpoint_connection(base_url: str, timeout_seconds: int) -> bool:
+    connected, detail = check_node_connection(base_url, timeout_seconds)
+    if connected:
+        ok(detail or "Connected to node API.")
+        return True
+
+    warn(f"Node is not connected at {base_url}.")
+    if detail:
+        warn(detail)
+
+    while True:
+        print()
+        print_option("1", "Enter a different endpoint URL")
+        print_option("2", "Continue with this endpoint anyway")
+        choice = read_menu_choice("Choose an option: ").strip()
+
+        if choice == "1":
+            return False
+        if choice == "2":
+            warn("Continuing with endpoint even though the connection check failed.")
+            return True
+
+        warn("Unknown option.")
+
+
+def _prompt_endpoint_url_with_connection_check(
+    prompt: str,
+    default_url: str,
+    timeout_seconds: int,
+) -> str:
+    while True:
+        raw_url = prompt_str(prompt, default_url)
+        try:
+            base_url = normalize_node_url(raw_url)
+        except ValueError as exc:
+            warn(str(exc))
+            continue
+
+        if _confirm_endpoint_connection(base_url, timeout_seconds):
+            return base_url
+
+
+def _detect_local_core_api_key(ctx: AppContext):
+    suggestion = detect_local_core_api_key(ctx.endpoint.base_url)
+    if suggestion:
+        ok(f"Detected local Core API key at: {suggestion.api_key_path}")
+    return suggestion
+
+
+def _prompt_required_api_key(ctx: AppContext, existing_api_key: str = "") -> str:
+    suggestion = _detect_local_core_api_key(ctx)
+    if suggestion:
+        api_key = prompt_secret(
+            "API key (X-API-KEY) [detected local Core key] (press Enter to use): "
+        ).strip()
+        return api_key or suggestion.api_key
+
+    has_existing_api_key = bool(existing_api_key) and (not is_placeholder(existing_api_key))
+    if has_existing_api_key:
+        api_key = prompt_secret("API key (X-API-KEY) (press Enter to keep current): ").strip()
+        return api_key or existing_api_key
+
+    return prompt_secret("API key (X-API-KEY): ").strip()
+
+
 def configure_endpoint_url(ctx: AppContext) -> None:
     current_url = ctx.endpoint.base_url
     while True:
@@ -102,13 +209,16 @@ def configure_endpoint_url(ctx: AppContext) -> None:
         )
         try:
             base_url = normalize_node_url(raw_url)
-            break
         except ValueError as exc:
             warn(str(exc))
+            continue
 
-    if base_url == current_url:
-        warn("Endpoint URL unchanged.")
-        return
+        if base_url == current_url:
+            warn("Endpoint URL unchanged.")
+            return
+
+        if _confirm_endpoint_connection(base_url, ctx.endpoint.timeout_seconds):
+            break
 
     ctx.endpoint = replace(ctx.endpoint, base_url=base_url)
     write_endpoint_file(ctx.settings_dir, ctx.endpoint)
@@ -132,7 +242,19 @@ def configure_timeout(ctx: AppContext) -> None:
 
 
 def configure_api_key(ctx: AppContext) -> None:
-    api_key = prompt_secret("New API key (press Enter to cancel): ").strip()
+    suggestion = _detect_local_core_api_key(ctx)
+    if suggestion:
+        api_key = prompt_secret(
+            "New API key [detected local Core key] "
+            "(press Enter to use, type /cancel to cancel): "
+        ).strip()
+        if not api_key:
+            api_key = suggestion.api_key
+        elif api_key.lower() == "/cancel":
+            api_key = ""
+    else:
+        api_key = prompt_secret("New API key (press Enter to cancel): ").strip()
+
     if not api_key:
         warn("API key unchanged.")
         return
@@ -152,6 +274,46 @@ def configure_wallet_identity(ctx: AppContext) -> None:
     print(C_TEXT + f"Account: {ctx.account.account_address}" + RESET)
 
 
+def run_initial_setup(ctx: AppContext) -> None:
+    print_setup_banner("First Run Setup")
+    print(C_TEXT + "Let's create endpoint.py and config.py in:" + RESET)
+    print(C_TEXT + f"  {ctx.settings_dir}" + RESET)
+    print()
+
+    current_url = ctx.endpoint.base_url
+    current_timeout = ctx.endpoint.timeout_seconds
+
+    base_url = _prompt_endpoint_url_with_connection_check(
+        f"Endpoint URL [{current_url}] (press Enter to use default): ",
+        current_url,
+        current_timeout,
+    )
+
+    timeout = prompt_int(
+        f"Timeout seconds [{current_timeout}] (press Enter to use default): ",
+        default=current_timeout,
+        minimum=1,
+    )
+    endpoint = EndpointSettings(base_url=base_url, timeout_seconds=timeout)
+    write_endpoint_file(ctx.settings_dir, endpoint)
+    ctx.endpoint = endpoint
+
+    existing_api_key = (ctx.account.api_key or "").strip()
+    api_key = _prompt_required_api_key(ctx, existing_api_key)
+
+    if not api_key:
+        raise RuntimeError("API key is required to continue setup.")
+
+    private_key = _prompt_private_key()
+    account = _account_from_private_key(ctx, private_key, api_key)
+    write_config_file(ctx.settings_dir, account)
+    ctx.account = account
+
+    ok("Setup complete. endpoint.py and config.py have been created.")
+    print(C_TEXT + f"Settings directory: {ctx.settings_dir}" + RESET)
+    pause()
+
+
 def run_reconfigure_menu(ctx: AppContext) -> None:
     while True:
         print_setup_banner("Reconfigure")
@@ -167,6 +329,7 @@ def run_reconfigure_menu(ctx: AppContext) -> None:
         print_option("2", "Change request timeout")
         print_option("3", "Change API key")
         print_option("4", "Change wallet / account")
+        print_option("9", "Run initial setup")
         print_option("0", "Back")
         choice = read_menu_choice("Choose an option: ")
 
@@ -190,6 +353,9 @@ def run_reconfigure_menu(ctx: AppContext) -> None:
                 configure_wallet_identity(ctx)
                 pause()
                 continue
+            if choice == "9":
+                run_initial_setup(ctx)
+                return
         except Exception as exc:
             error("Reconfiguration failed:")
             print(str(exc))
@@ -208,51 +374,4 @@ def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
     if current_endpoint_values_ready(ctx) and current_config_values_ready(ctx):
         return
 
-    print_setup_banner("First Run Setup")
-    print(C_TEXT + "Let's create endpoint.py and config.py in:" + RESET)
-    print(C_TEXT + f"  {ctx.settings_dir}" + RESET)
-    print()
-
-    current_url = ctx.endpoint.base_url
-    current_timeout = ctx.endpoint.timeout_seconds
-
-    while True:
-        raw_url = prompt_str(
-            f"Endpoint URL [{current_url}] (press Enter to use default): ",
-            current_url,
-        )
-        try:
-            base_url = normalize_node_url(raw_url)
-            break
-        except ValueError as exc:
-            warn(str(exc))
-
-    timeout = prompt_int(
-        f"Timeout seconds [{current_timeout}] (press Enter to use default): ",
-        default=current_timeout,
-        minimum=1,
-    )
-    endpoint = EndpointSettings(base_url=base_url, timeout_seconds=timeout)
-    write_endpoint_file(ctx.settings_dir, endpoint)
-    ctx.endpoint = endpoint
-
-    existing_api_key = (ctx.account.api_key or "").strip()
-    has_existing_api_key = bool(existing_api_key) and (not is_placeholder(existing_api_key))
-    if has_existing_api_key:
-        api_key = prompt_secret("API key (X-API-KEY) (press Enter to keep current): ").strip()
-        if not api_key:
-            api_key = existing_api_key
-    else:
-        api_key = prompt_secret("API key (X-API-KEY): ").strip()
-
-    if not api_key:
-        raise RuntimeError("API key is required to continue setup.")
-
-    private_key = _prompt_private_key()
-    account = _account_from_private_key(ctx, private_key, api_key)
-    write_config_file(ctx.settings_dir, account)
-    ctx.account = account
-
-    ok("Setup complete. endpoint.py and config.py have been created.")
-    print(C_TEXT + f"Settings directory: {ctx.settings_dir}" + RESET)
-    pause()
+    run_initial_setup(ctx)

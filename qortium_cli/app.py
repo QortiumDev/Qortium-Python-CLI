@@ -20,6 +20,7 @@ from qortium_cli.ui import (
     startup_splash,
     warn,
 )
+from qortium_cli.update_checker import maybe_notify_available_updates
 from qortium_cli.utils import pretty_exception
 
 
@@ -77,4 +78,5 @@ def run() -> None:
     settings_dir = resolve_settings_dir(project_root)
     ctx = create_context(settings_dir)
     configure_first_run_files(ctx)
+    maybe_notify_available_updates(settings_dir)
     run_main_menu(ctx)

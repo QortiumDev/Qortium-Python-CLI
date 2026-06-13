@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import base64
 import datetime
 import hashlib
-import json
 import traceback
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -11,8 +9,19 @@ from typing import Any, Dict, List
 
 import requests
 
-from qortium_cli.constants import BOLD, CHAT_USER_COLORS, QDN_SERVICES, RESET
-from qortium_cli.crypto import b58decode, b58encode, is_base58, to_base58_pubkey
+from qortium_cli.chat_format import (
+    DEFAULT_REACTION_CATEGORIES,
+    DEFAULT_REACTION_OPTIONS,
+    MessageReactionSummary,
+    MessageThread,
+    build_chat_message_text,
+    build_message_reaction_index,
+    build_message_threads,
+    build_reaction_message_text,
+    decode_chat_message,
+)
+from qortium_cli.constants import BOLD, CHAT_USER_COLORS, C_TEXT, QDN_SERVICES, RESET
+from qortium_cli.crypto import b58encode, to_base58_pubkey
 from qortium_cli.models import AppContext, ToolPlugin
 from qortium_cli.services import (
     build_arbitrary_delete,
@@ -78,6 +87,21 @@ ENABLE_SEND_PAYMENTS = True
 APPROVAL_THRESHOLDS = ("NONE", "ONE", "PCT20", "PCT40", "PCT60", "PCT80", "PCT100")
 ATOMIC_UNITS = Decimal("100000000")
 QDN_RESOURCE_PAGE_SIZE = 10
+WHATS_NEW_ENTRIES = (
+    (
+        "v0.3.0",
+        (
+            "Chat timeline now understands Qortium Chat reply, edit, and reaction envelopes.",
+            "Chat commands added: /reply, /edit, /react, /help, and /?.",
+            "Reply and reaction selection groups messages by sender to reduce long lists.",
+            "Reaction picker supports add/remove flows and emoji categories.",
+            "Setup can check endpoints, detect local Core API keys, import wallet files, "
+            "and create encrypted wallet files.",
+            "Register Name can list owned names and update an existing name.",
+            "Startup checks GitHub releases and lists newer stable or qualifying prerelease builds.",
+        ),
+    ),
+)
 
 
 def _chat_user_color(identity: str) -> str:
@@ -172,63 +196,452 @@ def _format_invite_expiry(expiry_ms: Any) -> str:
     return _format_chat_timestamp(expiry)
 
 
-def _extract_doc_text(node: Any) -> str:
-    if isinstance(node, dict):
-        node_type = str(node.get("type", ""))
-        if node_type == "text":
-            return str(node.get("text", ""))
-
-        parts = []
-        for child in node.get("content", []):
-            parts.append(_extract_doc_text(child))
-
-        if node_type == "paragraph":
-            return "".join(parts) + "\n"
-        return "".join(parts)
-
-    if isinstance(node, list):
-        return "".join(_extract_doc_text(child) for child in node)
-
-    return ""
+def _chat_message_signature(message: Dict[str, Any] | MessageThread) -> str:
+    if isinstance(message, MessageThread):
+        message = dict(message.original)
+    return str(message.get("signature") or "").strip()
 
 
-def _decode_chat_data(data: Any, encoding: Any) -> str:
-    if not isinstance(data, str) or not data:
+def _chat_message_sender(message: Dict[str, Any]) -> str:
+    return str(message.get("sender") or "").strip()
+
+
+def _chat_sender_label(message: Dict[str, Any]) -> str:
+    sender_address = _chat_message_sender(message)
+    return str(message.get("senderName") or sender_address or "Unknown").strip()
+
+
+def _chat_identity_display(message: Dict[str, Any]) -> str:
+    sender_address = _chat_message_sender(message)
+    sender_label = _chat_sender_label(message)
+    return _colorize_chat_identity(sender_label, sender_address or sender_label)
+
+
+def _chat_message_snippet(thread: MessageThread) -> str:
+    decoded = decode_chat_message(thread.latest)
+    for line in decoded.body.splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        if len(clean) > 96:
+            return clean[:93].rstrip() + "..."
+        return clean
+    return "[no text]"
+
+
+def _chat_reply_reference(thread: MessageThread, threads_by_signature: Dict[str, MessageThread]) -> str:
+    decoded = decode_chat_message(thread.latest)
+    if decoded.replied_to:
+        return decoded.replied_to
+
+    original_decoded = decode_chat_message(thread.original)
+    if original_decoded.replied_to:
+        return original_decoded.replied_to
+
+    reference = str(thread.original.get("chatReference") or "").strip()
+    if not reference:
         return ""
 
-    enc = str(encoding or "").upper()
-    decoded_bytes = None
+    referenced_thread = threads_by_signature.get(reference)
+    if not referenced_thread:
+        return ""
 
-    if enc == "BASE64":
+    if _chat_message_sender(dict(referenced_thread.original)) == _chat_message_sender(dict(thread.original)):
+        return ""
+
+    return reference
+
+
+def _format_chat_reactions(reactions: tuple[MessageReactionSummary, ...]) -> str:
+    return "  Reactions: " + "  ".join(
+        f"{reaction.content} {reaction.count}" for reaction in reactions
+    )
+
+
+def _normalize_chat_message_input(raw: str) -> str:
+    if raw.startswith("//"):
+        return raw[1:]
+    return raw
+
+
+def _print_chat_command_help() -> None:
+    print_section("Chat Commands")
+    print("/reply  Reply to a recent message.")
+    print("/react  React to a recent message.")
+    print("/edit   Edit one of your own recent text messages.")
+    print("/help   Show this help.")
+    print("/?      Show this help.")
+    print("/quit   Leave chat.")
+    print("//text  Send a message that starts with /.")
+
+
+def _replyable_chat_threads(messages: List[Dict[str, Any]]) -> List[MessageThread]:
+    replyable: List[MessageThread] = []
+    for thread in build_message_threads(messages):
+        original = dict(thread.original)
+        if not _chat_message_signature(original):
+            continue
+        if bool(original.get("_unconfirmed", False)):
+            continue
+        replyable.append(thread)
+    return replyable
+
+
+def _chat_thread_timestamp(thread: MessageThread) -> int:
+    try:
+        return int(thread.original.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _replyable_chat_user_groups(
+    messages: List[Dict[str, Any]],
+) -> List[tuple[str, str, List[MessageThread]]]:
+    groups: Dict[str, List[MessageThread]] = {}
+    labels: Dict[str, str] = {}
+
+    for thread in _replyable_chat_threads(messages):
+        original = dict(thread.original)
+        key = _chat_message_sender(original) or _chat_sender_label(original)
+        groups.setdefault(key, []).append(thread)
+        labels.setdefault(key, _chat_sender_label(original))
+
+    user_groups: List[tuple[str, str, List[MessageThread]]] = []
+    for key, threads in groups.items():
+        threads.sort(key=_chat_thread_timestamp, reverse=True)
+        user_groups.append((key, labels[key], threads))
+
+    user_groups.sort(key=lambda group: _chat_thread_timestamp(group[2][0]), reverse=True)
+    return user_groups
+
+
+def _format_replyable_chat_user(label: str, threads: List[MessageThread]) -> str:
+    count = len(threads)
+    count_label = "1 message" if count == 1 else f"{count} messages"
+    return f"{label} ({count_label}) - latest: {_chat_message_snippet(threads[0])}"
+
+
+def _format_replyable_chat_thread(thread: MessageThread) -> str:
+    timestamp = _format_chat_timestamp(thread.original.get("timestamp"))
+    snippet = _chat_message_snippet(thread)
+    edited_label = " [edited]" if thread.revisions else ""
+    return f"{timestamp} - {snippet}{edited_label}"
+
+
+def _select_chat_thread_by_sender(
+    messages: List[Dict[str, Any]],
+    *,
+    sender_section_title: str,
+    sender_prompt: str,
+    message_section_prefix: str,
+    message_prompt: str,
+    empty_warning: str,
+) -> MessageThread | None:
+    user_groups = _replyable_chat_user_groups(messages)
+    if not user_groups:
+        warn(empty_warning)
+        return None
+
+    while True:
+        print_section(sender_section_title)
+        for index, (_, label, threads) in enumerate(user_groups, start=1):
+            print_option(str(index), _format_replyable_chat_user(label, threads))
+        print_option("0", "Cancel")
+
+        choice = read_menu_choice(sender_prompt)
+        if choice == "0":
+            return None
         try:
-            decoded_bytes = base64.b64decode(data)
-        except Exception:
-            return data
-    elif enc == "BASE58" or is_base58(data):
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            _, label, sender_threads = user_groups[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+            continue
+
+        print_section(f"{message_section_prefix} {label}")
+        for index, thread in enumerate(sender_threads, start=1):
+            print_option(str(index), _format_replyable_chat_thread(thread))
+        print_option("0", "Back")
+
+        while True:
+            choice = read_menu_choice(message_prompt)
+            if choice == "0":
+                break
+            try:
+                selected_index = int(choice) - 1
+                if selected_index < 0:
+                    raise IndexError
+                return sender_threads[selected_index]
+            except (ValueError, IndexError):
+                warn("Unknown option.")
+
+
+def _select_replyable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThread | None:
+    return _select_chat_thread_by_sender(
+        messages,
+        sender_section_title="Reply Sender",
+        sender_prompt="Choose sender to reply to: ",
+        message_section_prefix="Messages From",
+        message_prompt="Choose message to reply to: ",
+        empty_warning="No replyable messages found in the current chat history.",
+    )
+
+
+def _select_reactable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThread | None:
+    return _select_chat_thread_by_sender(
+        messages,
+        sender_section_title="Reaction Sender",
+        sender_prompt="Choose sender to react to: ",
+        message_section_prefix="Messages From",
+        message_prompt="Choose message to react to: ",
+        empty_warning="No reactable messages found in the current chat history.",
+    )
+
+
+def _select_chat_reaction(
+    reactions: tuple[MessageReactionSummary, ...],
+) -> tuple[str, bool] | None:
+    self_reactions = _self_reaction_contents(reactions)
+    if self_reactions:
+        action = _select_reaction_action(self_reactions)
+        if action is None:
+            return None
+    else:
+        action = "add"
+
+    if action == "remove":
+        reaction = _select_reaction_to_remove(self_reactions)
+        return (reaction, False) if reaction else None
+
+    reaction = _select_reaction_to_add(self_reactions)
+    return (reaction, True) if reaction else None
+
+
+def _self_reaction_contents(reactions: tuple[MessageReactionSummary, ...]) -> set[str]:
+    return {reaction.content for reaction in reactions if reaction.reacted_by_self}
+
+
+def _format_reaction_list(reactions: set[str]) -> str:
+    return " ".join(sorted(reactions, key=_reaction_sort_key))
+
+
+def _reaction_sort_key(reaction: str) -> tuple[int, str]:
+    try:
+        index = DEFAULT_REACTION_OPTIONS.index(reaction)
+    except ValueError:
+        index = len(DEFAULT_REACTION_OPTIONS)
+    return index, reaction
+
+
+def _select_reaction_action(self_reactions: set[str]) -> str | None:
+    print_section("Reaction Action")
+    print(f"Current reactions: {_format_reaction_list(self_reactions)}")
+    print_option("1", "Add reaction")
+    print_option("2", "Remove reaction")
+    print_option("0", "Cancel")
+
+    while True:
+        choice = read_menu_choice("Choose reaction action: ")
+        if choice == "0":
+            return None
+        if choice == "1":
+            return "add"
+        if choice == "2":
+            return "remove"
+        warn("Unknown option.")
+
+
+def _reaction_categories_for_add(self_reactions: set[str]) -> list[tuple[str, tuple[str, ...]]]:
+    return [
+        (label, tuple(reaction for reaction in reactions if reaction not in self_reactions))
+        for label, reactions in DEFAULT_REACTION_CATEGORIES
+        if any(reaction not in self_reactions for reaction in reactions)
+    ]
+
+
+def _select_reaction_to_add(self_reactions: set[str]) -> str | None:
+    categories = _reaction_categories_for_add(self_reactions)
+    if not categories:
+        warn("No additional reactions are available.")
+        return None
+
+    while True:
+        print_section("Reaction Category")
+        for index, (label, reactions) in enumerate(categories, start=1):
+            print_option(str(index), f"{label} ({len(reactions)})")
+        print_option("0", "Cancel")
+
+        choice = read_menu_choice("Choose reaction category: ")
+        if choice == "0":
+            return None
         try:
-            decoded_bytes = b58decode(data)
-        except Exception:
-            return data
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            label, category_reactions = categories[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+            continue
 
-    if decoded_bytes is None:
-        return data
+        print_section(label)
+        for index, reaction in enumerate(category_reactions, start=1):
+            print_option(str(index), reaction)
+        print_option("0", "Back")
 
-    text = decoded_bytes.decode("utf-8", errors="replace")
-    stripped = text.strip()
+        while True:
+            choice = read_menu_choice("Choose reaction: ")
+            if choice == "0":
+                break
+            try:
+                selected_index = int(choice) - 1
+                if selected_index < 0:
+                    raise IndexError
+                return category_reactions[selected_index]
+            except (ValueError, IndexError):
+                warn("Unknown option.")
 
-    if stripped.startswith("{") and stripped.endswith("}"):
+
+def _select_reaction_to_remove(self_reactions: set[str]) -> str | None:
+    removable_reactions = tuple(sorted(self_reactions, key=_reaction_sort_key))
+    if not removable_reactions:
+        warn("No reactions to remove.")
+        return None
+
+    print_section("Remove Reaction")
+    for index, reaction in enumerate(removable_reactions, start=1):
+        print_option(str(index), reaction)
+    print_option("0", "Cancel")
+
+    while True:
+        choice = read_menu_choice("Choose reaction to remove: ")
+        if choice == "0":
+            return None
         try:
-            payload = json.loads(stripped)
-            if isinstance(payload, dict):
-                message_doc = payload.get("messageText")
-                if isinstance(message_doc, dict):
-                    doc_text = _extract_doc_text(message_doc).strip()
-                    if doc_text:
-                        return doc_text
-        except Exception:
-            pass
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            return removable_reactions[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
 
-    return text
+
+def _editable_chat_threads(ctx: AppContext, messages: List[Dict[str, Any]]) -> List[MessageThread]:
+    editable: List[MessageThread] = []
+    for thread in build_message_threads(messages):
+        original = dict(thread.original)
+        latest = dict(thread.latest)
+        if _chat_message_sender(original) != ctx.account.account_address:
+            continue
+        if not _chat_message_signature(original):
+            continue
+        if bool(original.get("_unconfirmed", False)):
+            continue
+        if decode_chat_message(latest).kind != "text":
+            continue
+        editable.append(thread)
+    return editable
+
+
+def _format_editable_chat_thread(thread: MessageThread) -> str:
+    timestamp = _format_chat_timestamp(thread.original.get("timestamp"))
+    snippet = _chat_message_snippet(thread)
+    edited_label = " [edited]" if thread.revisions else ""
+    return f"{timestamp} - {snippet}{edited_label}"
+
+
+def _select_editable_chat_thread(ctx: AppContext, messages: List[Dict[str, Any]]) -> MessageThread | None:
+    editable = _editable_chat_threads(ctx, messages)
+    if not editable:
+        warn("No editable messages found in the current chat history.")
+        return None
+
+    print_section("Editable Messages")
+    for index, thread in enumerate(editable, start=1):
+        print_option(str(index), _format_editable_chat_thread(thread))
+    print_option("0", "Cancel")
+
+    while True:
+        choice = read_menu_choice("Choose message to edit: ")
+        if choice == "0":
+            return None
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            return editable[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+
+
+def _run_chat_reply_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> Any | None:
+    thread = _select_replyable_chat_thread(messages)
+    if not thread:
+        return None
+
+    print()
+    print("Replying to:")
+    print(f"  {_chat_sender_label(dict(thread.original))}: {_chat_message_snippet(thread)}")
+    reply = prompt_str("Reply message (Enter to cancel): ", "").strip()
+    if not reply:
+        warn("Reply cancelled.")
+        return None
+
+    target_signature = _chat_message_signature(dict(thread.original))
+    message_text = build_chat_message_text(
+        _normalize_chat_message_input(reply),
+        target_signature,
+    )
+    return _send_chat_message(ctx, message_text)
+
+
+def _run_chat_reaction_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> Any | None:
+    thread = _select_reactable_chat_thread(messages)
+    if not thread:
+        return None
+
+    target_signature = _chat_message_signature(dict(thread.original))
+    reactions_by_signature = build_message_reaction_index(
+        messages,
+        self_address=ctx.account.account_address,
+    )
+
+    print()
+    print("Reacting to:")
+    print(f"  {_chat_sender_label(dict(thread.original))}: {_chat_message_snippet(thread)}")
+
+    selection = _select_chat_reaction(reactions_by_signature.get(target_signature, ()))
+    if not selection:
+        warn("Reaction cancelled.")
+        return None
+
+    reaction, content_state = selection
+    message_text = build_reaction_message_text(reaction, content_state)
+    return _send_chat_message(ctx, message_text, chat_reference=target_signature)
+
+
+def _run_chat_edit_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> Any | None:
+    thread = _select_editable_chat_thread(ctx, messages)
+    if not thread:
+        return None
+
+    print()
+    print("Current message:")
+    print(f"  {_chat_message_snippet(thread)}")
+    replacement = prompt_str("New message (Enter to cancel): ", "").strip()
+    if not replacement:
+        warn("Edit cancelled.")
+        return None
+
+    original = dict(thread.original)
+    original_signature = _chat_message_signature(original)
+    replied_to = decode_chat_message(original).replied_to
+    message_text = build_chat_message_text(
+        _normalize_chat_message_input(replacement),
+        replied_to,
+    )
+    return _send_chat_message(ctx, message_text, chat_reference=original_signature)
 
 
 def _get_chat_fee_decimal(ctx: AppContext) -> Decimal:
@@ -599,37 +1012,67 @@ def _print_chat_timeline(messages: List[Dict[str, Any]]) -> None:
         warn("No messages found for this group.")
         return
 
-    print_section(f"Chat Timeline ({len(messages)} messages)")
+    threads = build_message_threads(messages)
+    reactions_by_signature = build_message_reaction_index(messages)
+    if not threads:
+        warn("No displayable chat messages found for this group.")
+        return
+
+    threads_by_signature = {
+        _chat_message_signature(thread): thread
+        for thread in threads
+        if _chat_message_signature(thread)
+    }
+
+    print_section(f"Chat Timeline ({len(threads)} messages)")
     print()
 
-    for message in messages:
-        timestamp = _format_chat_timestamp(message.get("timestamp"))
-        sender_address = str(message.get("sender") or "").strip()
-        sender_label = str(message.get("senderName") or sender_address or "Unknown").strip()
-        sender = _colorize_chat_identity(sender_label, sender_address or sender_label)
+    for thread in threads:
+        original = dict(thread.original)
+        latest = dict(thread.latest)
+        decoded = decode_chat_message(latest)
 
-        recipient = str(message.get("recipient") or "").strip()
+        timestamp = _format_chat_timestamp(original.get("timestamp"))
+        sender = _chat_identity_display(original)
+
+        recipient = str(original.get("recipient") or "").strip()
         recipient_label = _colorize_chat_identity(recipient, recipient) if recipient else ""
 
-        body = _decode_chat_data(message.get("data"), message.get("encoding"))
-        is_encrypted = bool(message.get("isEncrypted", False))
-        is_unconfirmed = bool(message.get("_unconfirmed", False))
+        is_encrypted = bool(latest.get("isEncrypted", False)) or decoded.kind == "encrypted"
+        is_unconfirmed = bool(latest.get("_unconfirmed", False) or original.get("_unconfirmed", False))
 
         target_label = f" -> {recipient_label}" if recipient else ""
         encryption_label = " [enc]" if is_encrypted else ""
+        edited_label = " [edited]" if thread.revisions else ""
         unconfirmed_label = " [mempool]" if is_unconfirmed else ""
-        print(f"[{timestamp}] {sender}{target_label}{encryption_label}{unconfirmed_label}")
+        print(
+            f"[{timestamp}] {sender}{target_label}"
+            f"{encryption_label}{edited_label}{unconfirmed_label}"
+        )
 
-        if body.strip():
-            for line in body.splitlines():
+        replied_to = _chat_reply_reference(thread, threads_by_signature)
+        referenced_thread = threads_by_signature.get(replied_to)
+        if referenced_thread:
+            reply_sender = _chat_sender_label(dict(referenced_thread.original))
+            print(f"  > reply to {reply_sender}: {_chat_message_snippet(referenced_thread)}")
+        elif replied_to:
+            print("  > reply to: unavailable")
+
+        if decoded.body.strip():
+            for line in decoded.body.splitlines():
                 print(f"  {line}")
         else:
             print("  [no text payload]")
 
+        signature = _chat_message_signature(thread)
+        reactions = reactions_by_signature.get(signature, ())
+        if reactions:
+            print(_format_chat_reactions(reactions))
+
         print()
 
 
-def _send_chat_message(ctx: AppContext, message: str) -> Any:
+def _send_chat_message(ctx: AppContext, message: str, *, chat_reference: str = "") -> Any:
     ensure_wallet_config_ready(ctx)
 
     sender_pub = to_base58_pubkey(ctx.account.public_key)
@@ -649,6 +1092,9 @@ def _send_chat_message(ctx: AppContext, message: str) -> Any:
             "isText": 1,
             "isEncrypted": 0,
         }
+        if chat_reference:
+            payload["chatReference"] = chat_reference
+
         unsigned_tx = build_chat(ctx, payload, session)
 
         print("[2/4] Computing nonce (can take 10s-180s on lower-balance accounts)...", flush=True)
@@ -680,7 +1126,6 @@ def run_chat_room(ctx: AppContext) -> None:
         print_stat("Fee", d8(_get_chat_fee_decimal(ctx)))
         print()
         print("Type a message and press Enter to send.")
-        print("Use /quit to leave chat. Empty input refreshes.")
         print()
 
         try:
@@ -696,14 +1141,82 @@ def run_chat_room(ctx: AppContext) -> None:
             pause()
             return
 
+        print("/? for help")
         raw = prompt_str("message > ", "")
-        if raw.strip() == "/quit":
+        stripped = raw.strip()
+        command = stripped.lower()
+        if stripped == "":
+            continue
+        if command == "/quit":
             return
-        if raw.strip() == "":
+        if command in {"/help", "/?"}:
+            _print_chat_command_help()
+            pause()
+            continue
+        if command == "/reply":
+            try:
+                result = _run_chat_reply_command(ctx, messages)
+                if result is None:
+                    pause()
+                    continue
+                ok("Chat reply submitted.")
+                if ctx.debug:
+                    print("Process response: " + str(result))
+                input("Press Enter to refresh chat...")
+            except Exception as exc:
+                error("Failed to reply to chat message:")
+                if _is_node_unreachable_error(exc):
+                    _print_node_unreachable_hint(ctx)
+                else:
+                    print(pretty_exception(exc))
+                    _print_debug_traceback(ctx, exc)
+                pause()
+            continue
+        if command == "/react":
+            try:
+                result = _run_chat_reaction_command(ctx, messages)
+                if result is None:
+                    pause()
+                    continue
+                ok("Chat reaction submitted.")
+                if ctx.debug:
+                    print("Process response: " + str(result))
+                input("Press Enter to refresh chat...")
+            except Exception as exc:
+                error("Failed to react to chat message:")
+                if _is_node_unreachable_error(exc):
+                    _print_node_unreachable_hint(ctx)
+                else:
+                    print(pretty_exception(exc))
+                    _print_debug_traceback(ctx, exc)
+                pause()
+            continue
+        if command == "/edit":
+            try:
+                result = _run_chat_edit_command(ctx, messages)
+                if result is None:
+                    pause()
+                    continue
+                ok("Chat edit submitted.")
+                if ctx.debug:
+                    print("Process response: " + str(result))
+                input("Press Enter to refresh chat...")
+            except Exception as exc:
+                error("Failed to edit chat message:")
+                if _is_node_unreachable_error(exc):
+                    _print_node_unreachable_hint(ctx)
+                else:
+                    print(pretty_exception(exc))
+                    _print_debug_traceback(ctx, exc)
+                pause()
+            continue
+        if stripped.startswith("/") and not stripped.startswith("//"):
+            warn("Unknown chat command. Type /help for commands, or use // to send a leading slash.")
+            pause()
             continue
 
         try:
-            result = _send_chat_message(ctx, raw)
+            result = _send_chat_message(ctx, _normalize_chat_message_input(stripped))
             ok("Chat message submitted.")
             if ctx.debug:
                 print("Process response: " + str(result))
@@ -963,9 +1476,9 @@ def tx_group_create(ctx: AppContext) -> None:
 
 def tx_name_register(ctx: AppContext) -> None:
     ensure_wallet_config_ready(ctx)
-    name = prompt_str("Name to register: ").strip()
+    name = prompt_str("Name to register (Enter to cancel): ").strip()
     if not name:
-        warn("Name cannot be empty.")
+        warn("Name registration cancelled.")
         return
 
     name_data = prompt_str("Name data [{}]: ", "{}")
@@ -980,6 +1493,59 @@ def tx_name_register(ctx: AppContext) -> None:
             "registrantPublicKey": sender_pub,
             "name": name,
             "data": name_data,
+        },
+        fee,
+        tx_group_id,
+    )
+
+
+def _select_owned_name_for_update(owned_names: List[str]) -> str | None:
+    print()
+    print_section("Choose Name")
+    for index, name in enumerate(owned_names, start=1):
+        print_option(str(index), name)
+    print_option("0", "Cancel")
+    choice = read_menu_choice("Choose a name: ")
+    if choice == "0":
+        warn("Name update cancelled.")
+        return None
+
+    try:
+        selected_index = int(choice) - 1
+        return owned_names[selected_index]
+    except (ValueError, IndexError):
+        warn("Unknown option.")
+        return None
+
+
+def tx_name_update(ctx: AppContext, owned_names: List[str]) -> None:
+    ensure_wallet_config_ready(ctx)
+    selected_name = _select_owned_name_for_update(owned_names)
+    if not selected_name:
+        return
+
+    new_name = prompt_str(
+        f"New name for '{selected_name}' [keep current]: ",
+        "",
+    )
+
+    new_data = prompt_str(
+        "New name data [keep current]: ",
+        "",
+    )
+
+    fee, tx_group_id = _prompt_tx_common_inputs(default_fee=Decimal("0"))
+    sender_pub = to_base58_pubkey(ctx.account.public_key)
+
+    _submit_builder_transaction(
+        ctx,
+        "/names/update",
+        "UPDATE_NAME",
+        {
+            "ownerPublicKey": sender_pub,
+            "name": selected_name,
+            "newName": new_name.strip(),
+            "newData": new_data,
         },
         fee,
         tx_group_id,
@@ -1320,10 +1886,45 @@ def tool_groups(ctx: AppContext) -> None:
 
 
 def tool_register_name(ctx: AppContext) -> None:
+    ensure_wallet_config_ready(ctx)
     print_banner(ctx.endpoint.base_url, "Register Name")
     print_stat("Account", ctx.account.account_address)
     print()
-    tx_name_register(ctx)
+
+    with make_session(ctx, include_api_key=False) as session:
+        owned_names = get_account_names(
+            ctx,
+            ctx.account.account_address,
+            session,
+            limit=500,
+        )
+
+    if not owned_names:
+        tx_name_register(ctx)
+        pause()
+        return
+
+    print_section("Registered Names")
+    for name in owned_names:
+        print(C_TEXT + f"- {name}" + RESET)
+    print()
+    print_option("1", "Update name")
+    print_option("2", "New name")
+    print_option("0", "Back")
+
+    choice = read_menu_choice("Choose an option: ")
+    if choice == "0":
+        return
+    if choice == "1":
+        tx_name_update(ctx, owned_names)
+        pause()
+        return
+    if choice == "2":
+        tx_name_register(ctx)
+        pause()
+        return
+
+    warn("Unknown option.")
     pause()
 
 
@@ -1922,6 +2523,55 @@ def tool_wallet(ctx: AppContext) -> None:
         pause()
 
 
+def _print_whats_new_entry(version: str, bullets: tuple[str, ...]) -> None:
+    print_section(version)
+    for bullet in bullets:
+        print(C_TEXT + f"- {bullet}" + RESET)
+
+
+def _tool_whats_new(ctx: AppContext) -> None:
+    while True:
+        print_banner(ctx.endpoint.base_url, "What's New?")
+        for index, (version, _) in enumerate(WHATS_NEW_ENTRIES, start=1):
+            print_option(str(index), version)
+        print_option("0", "Back")
+
+        choice = read_menu_choice("Choose a version: ")
+        if choice == "0":
+            return
+
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            version, bullets = WHATS_NEW_ENTRIES[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+            pause()
+            continue
+
+        print_banner(ctx.endpoint.base_url, f"What's New? {version}")
+        _print_whats_new_entry(version, bullets)
+        pause()
+
+
+def tool_help_info(ctx: AppContext) -> None:
+    while True:
+        print_banner(ctx.endpoint.base_url, "Help/Info")
+        print_option("1", "What's New?")
+        print_option("0", "Back")
+
+        choice = read_menu_choice("Choose an option: ")
+        if choice == "0":
+            return
+        if choice == "1":
+            _tool_whats_new(ctx)
+            continue
+
+        warn("Unknown option.")
+        pause()
+
+
 def build_tool_plugins() -> List[ToolPlugin]:
     tools = [
         ToolPlugin("1", "Node", "Node status and admin controls", tool_node),
@@ -1937,6 +2587,14 @@ def build_tool_plugins() -> List[ToolPlugin]:
             "QDN Resources",
             "Publish APPs or delete arbitrary resources",
             tool_qdn_resources,
+        )
+    )
+    tools.append(
+        ToolPlugin(
+            "8",
+            "Help/Info",
+            "Documentation and changelog",
+            tool_help_info,
         )
     )
     return tools

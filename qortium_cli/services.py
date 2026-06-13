@@ -64,6 +64,39 @@ def generate_api_key_via_node(base_url: str, timeout_seconds: int, existing_api_
     return api_key
 
 
+def check_node_connection(base_url: str, timeout_seconds: int) -> tuple[bool, str]:
+    timeout = min(max(1, int(timeout_seconds)), 5)
+    try:
+        response = requests.get(
+            f"{base_url}/admin/status",
+            headers={"Accept": "application/json,text/plain"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+    except requests.exceptions.Timeout:
+        return False, f"Timed out after {timeout} seconds while checking /admin/status."
+    except requests.exceptions.ConnectionError as exc:
+        return False, f"Connection failed while checking /admin/status: {exc}"
+    except requests.exceptions.HTTPError as exc:
+        detail = http_error_detail(exc)
+        status_code = exc.response.status_code if exc.response is not None else 0
+        return False, f"/admin/status returned HTTP {status_code}: {detail}"
+    except requests.exceptions.RequestException as exc:
+        return False, f"Connection check failed while checking /admin/status: {exc}"
+
+    try:
+        status = response.json()
+    except Exception:
+        return False, "/admin/status responded, but did not return node status JSON."
+
+    if not isinstance(status, dict):
+        return False, "/admin/status responded, but did not return node status JSON."
+
+    height = status.get("height", "Unknown")
+    sync_percent = status.get("syncPercent", "Unknown")
+    return True, f"Node API responded. Height: {height}; sync: {sync_percent}%."
+
+
 def qortal_public_key_from_private(base_url: str, private_key: str, timeout_seconds: int) -> str:
     response = requests.post(
         f"{base_url}/utils/publickey",

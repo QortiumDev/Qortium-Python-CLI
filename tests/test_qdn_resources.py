@@ -20,6 +20,9 @@ from qortium_cli.tools import (
     _submit_arbitrary_publish_transaction,
     browse_qdn_resources,
     select_qdn_resource,
+    tool_register_name,
+    tx_name_register,
+    tx_name_update,
 )
 
 
@@ -330,6 +333,136 @@ class QdnServiceTests(TestCase):
 
 
 class QdnWorkflowTests(TestCase):
+    def test_register_name_menu_registers_directly_without_owned_names(self) -> None:
+        ctx = make_context()
+        session = MagicMock()
+        session_context = MagicMock()
+        session_context.__enter__.return_value = session
+
+        with (
+            patch("qortium_cli.tools.make_session", return_value=session_context),
+            patch("qortium_cli.tools.get_account_names", return_value=[]) as get_names,
+            patch("qortium_cli.tools.tx_name_register") as register_name,
+            patch("qortium_cli.tools.print_banner"),
+            patch("qortium_cli.tools.print_stat"),
+            patch("qortium_cli.tools.pause") as pause,
+        ):
+            tool_register_name(ctx)
+
+        get_names.assert_called_once_with(
+            ctx,
+            ctx.account.account_address,
+            session,
+            limit=500,
+        )
+        register_name.assert_called_once_with(ctx)
+        pause.assert_called_once()
+
+    def test_register_name_menu_updates_existing_name(self) -> None:
+        ctx = make_context()
+        session = MagicMock()
+        session_context = MagicMock()
+        session_context.__enter__.return_value = session
+        owned_names = ["First Name", "Second Name"]
+
+        with (
+            patch("qortium_cli.tools.make_session", return_value=session_context),
+            patch("qortium_cli.tools.get_account_names", return_value=owned_names),
+            patch("qortium_cli.tools.read_menu_choice", return_value="1"),
+            patch("qortium_cli.tools.tx_name_update") as update_name,
+            patch("qortium_cli.tools.print_banner"),
+            patch("qortium_cli.tools.print_section"),
+            patch("qortium_cli.tools.print_stat"),
+            patch("qortium_cli.tools.print_option"),
+            patch("qortium_cli.tools.pause") as pause,
+        ):
+            tool_register_name(ctx)
+
+        update_name.assert_called_once_with(ctx, owned_names)
+        pause.assert_called_once()
+
+    def test_register_name_menu_can_start_new_name_when_owned_names_exist(self) -> None:
+        ctx = make_context()
+        session_context = MagicMock()
+        session_context.__enter__.return_value = MagicMock()
+
+        with (
+            patch("qortium_cli.tools.make_session", return_value=session_context),
+            patch("qortium_cli.tools.get_account_names", return_value=["My Name"]),
+            patch("qortium_cli.tools.read_menu_choice", return_value="2"),
+            patch("qortium_cli.tools.tx_name_register") as register_name,
+            patch("qortium_cli.tools.print_banner"),
+            patch("qortium_cli.tools.print_section"),
+            patch("qortium_cli.tools.print_stat"),
+            patch("qortium_cli.tools.print_option"),
+            patch("qortium_cli.tools.pause") as pause,
+        ):
+            tool_register_name(ctx)
+
+        register_name.assert_called_once_with(ctx)
+        pause.assert_called_once()
+
+    def test_name_register_can_cancel_with_blank_name(self) -> None:
+        ctx = make_context()
+
+        with (
+            patch("qortium_cli.tools.prompt_str", return_value=""),
+            patch("qortium_cli.tools._submit_builder_transaction") as submit_tx,
+            patch("qortium_cli.tools.warn"),
+        ):
+            tx_name_register(ctx)
+
+        submit_tx.assert_not_called()
+
+    def test_name_update_builds_update_name_transaction(self) -> None:
+        ctx = make_context()
+
+        with (
+            patch("qortium_cli.tools.read_menu_choice", return_value="2"),
+            patch(
+                "qortium_cli.tools.prompt_str",
+                side_effect=["Renamed Name", "{\"bio\":\"updated\"}"],
+            ),
+            patch("qortium_cli.tools.prompt_decimal", return_value=Decimal("0")),
+            patch("qortium_cli.tools.prompt_int", return_value=0),
+            patch(
+                "qortium_cli.tools.to_base58_pubkey",
+                return_value="owner-public-key",
+            ),
+            patch("qortium_cli.tools._submit_builder_transaction") as submit_tx,
+            patch("qortium_cli.tools.print_section"),
+            patch("qortium_cli.tools.print_option"),
+        ):
+            tx_name_update(ctx, ["First Name", "Second Name"])
+
+        submit_tx.assert_called_once_with(
+            ctx,
+            "/names/update",
+            "UPDATE_NAME",
+            {
+                "ownerPublicKey": "owner-public-key",
+                "name": "Second Name",
+                "newName": "Renamed Name",
+                "newData": "{\"bio\":\"updated\"}",
+            },
+            "0.00000000",
+            0,
+        )
+
+    def test_name_update_can_cancel_name_selection_with_zero(self) -> None:
+        ctx = make_context()
+
+        with (
+            patch("qortium_cli.tools.read_menu_choice", return_value="0"),
+            patch("qortium_cli.tools._submit_builder_transaction") as submit_tx,
+            patch("qortium_cli.tools.print_section"),
+            patch("qortium_cli.tools.print_option"),
+            patch("qortium_cli.tools.warn"),
+        ):
+            tx_name_update(ctx, ["My Name"])
+
+        submit_tx.assert_not_called()
+
     def test_resource_tuple_normalizes_missing_identifier(self) -> None:
         self.assertEqual(
             _qdn_resource_tuple(
