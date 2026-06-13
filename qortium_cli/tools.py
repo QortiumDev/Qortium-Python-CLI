@@ -6,24 +6,34 @@ import hashlib
 import json
 import traceback
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
 
-from qortium_cli.constants import BOLD, CHAT_USER_COLORS, RESET
+from qortium_cli.constants import BOLD, CHAT_USER_COLORS, QDN_SERVICES, RESET
 from qortium_cli.crypto import b58decode, b58encode, is_base58, to_base58_pubkey
 from qortium_cli.models import AppContext, ToolPlugin
 from qortium_cli.services import (
+    build_arbitrary_delete,
+    build_arbitrary_from_path,
     build_chat,
     build_payment,
     build_raw_transaction,
+    delete_local_arbitrary_resource,
     compute_transaction_nonce,
     compute_chat_nonce,
     fetch_node_snapshot,
     get_asset_balances,
     get_asset_info,
     get_chat_messages,
+    get_admin_group_join_requests,
+    get_group_info,
+    get_group_invites,
+    get_hosted_arbitrary_resources,
     get_last_reference,
+    get_account_names,
+    get_name_info,
     get_recommended_fee,
     get_qort_balance,
     get_timestamp,
@@ -32,6 +42,7 @@ from qortium_cli.services import (
     make_session,
     process_tx,
     request_text_or_json,
+    search_arbitrary_resources,
     sign_tx,
 )
 from qortium_cli.storage import write_chat_settings
@@ -45,6 +56,7 @@ from qortium_cli.ui import (
     print_stat,
     prompt_decimal,
     prompt_int,
+    prompt_secret,
     prompt_str,
     prompt_yes_no,
     read_menu_choice,
@@ -53,6 +65,11 @@ from qortium_cli.ui import (
 from qortium_cli.utils import d8, format_bool, format_sync_percent, format_uptime, pretty_exception
 from qortium_cli.utils import qort_to_atomic
 from qortium_cli.validators import is_placeholder, looks_like_qortal_address
+from qortium_cli.wallet_backup import (
+    default_wallet_backup_path,
+    generate_wallet_backup_from_private_key,
+    write_wallet_backup,
+)
 
 CHAT_HISTORY_PAGE_SIZE = 200
 CHAT_HISTORY_MAX_MESSAGES = 1000
@@ -60,6 +77,7 @@ ENABLE_WALLET_TOOL = True
 ENABLE_SEND_PAYMENTS = True
 APPROVAL_THRESHOLDS = ("NONE", "ONE", "PCT20", "PCT40", "PCT60", "PCT80", "PCT100")
 ATOMIC_UNITS = Decimal("100000000")
+QDN_RESOURCE_PAGE_SIZE = 10
 
 
 def _chat_user_color(identity: str) -> str:
@@ -138,6 +156,20 @@ def _format_chat_timestamp(timestamp_ms: Any) -> str:
         return datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return "Unknown"
+
+
+def _format_invite_expiry(expiry_ms: Any) -> str:
+    if expiry_ms in (None, ""):
+        return "Never"
+
+    try:
+        expiry = int(expiry_ms)
+    except (TypeError, ValueError):
+        return "Unknown"
+
+    if expiry <= 0:
+        return "Never"
+    return _format_chat_timestamp(expiry)
 
 
 def _extract_doc_text(node: Any) -> str:
@@ -368,6 +400,146 @@ def _format_asset_balance(balance_raw: Any, divisible: bool) -> str:
     return str(int(atomic))
 
 
+def _parse_arbitrary_tags(raw_tags: str) -> list[str]:
+    tags = [part.strip() for part in str(raw_tags or "").split(",") if part.strip()]
+    if len(tags) > 5:
+        raise RuntimeError("QDN supports at most 5 tags.")
+    for tag in tags:
+        if len(tag) > 20:
+            raise RuntimeError(f"QDN tag exceeds 20 characters: {tag}")
+    return tags
+
+
+def _submit_arbitrary_publish_transaction(
+    ctx: AppContext,
+    *,
+    service: str,
+    name: str,
+    identifier: str,
+    local_path: str,
+    title: str,
+    description: str,
+    tags: list[str],
+    category: str,
+    fee: Decimal,
+    preview: bool = False,
+    auto_nonce: bool = True,
+) -> None:
+    ensure_wallet_config_ready(ctx)
+    ensure_api_key(ctx)
+
+    source_path = Path(local_path).expanduser()
+    if not source_path.exists():
+        raise RuntimeError(f"Local path does not exist: {source_path}")
+    if fee < 0:
+        raise RuntimeError("Fee cannot be negative.")
+
+    current_fee = fee
+    with make_session(ctx, include_api_key=True) as session:
+        name_info = get_name_info(ctx, name, session)
+        owner = str(name_info.get("owner", "") or "").strip()
+        if not owner:
+            raise RuntimeError(f"Unable to determine owner for registered name: {name}")
+        if owner != ctx.account.account_address:
+            raise RuntimeError(
+                f"Name '{name}' is owned by {owner}, not the configured wallet "
+                f"{ctx.account.account_address}."
+            )
+
+        print("\n[1/3] Building ARBITRARY APP transaction...", flush=True)
+        fee_atomic = qort_to_atomic(current_fee)
+        unsigned_tx = build_arbitrary_from_path(
+            ctx,
+            session,
+            service=service,
+            name=name,
+            identifier=identifier or None,
+            local_path=str(source_path.resolve()),
+            title=title or None,
+            description=description or None,
+            tags=tags or None,
+            category=category or None,
+            fee_atomic=fee_atomic if fee_atomic > 0 else None,
+            preview=preview,
+        )
+
+        print("[2/3] Signing transaction...", flush=True)
+        signed_tx = sign_tx(ctx, unsigned_tx, session)
+        print("[3/3] Processing transaction...", flush=True)
+
+        fee_retried = False
+        nonce_retried = False
+        while True:
+            try:
+                result = process_tx(ctx, signed_tx, session)
+                break
+            except Exception as exc:
+                should_try_mempow = (
+                    _is_insufficient_fee_error(exc)
+                    or is_nonce_or_pow_error(exc)
+                    or _is_invalid_signature_error(exc)
+                )
+                if auto_nonce and not nonce_retried and should_try_mempow:
+                    try:
+                        print("\n[1/3] Computing arbitrary transaction nonce...", flush=True)
+                        unsigned_tx, nonce_path = compute_transaction_nonce(
+                            ctx,
+                            unsigned_tx,
+                            session,
+                            compute_paths=("/arbitrary/compute",),
+                        )
+                        nonce_retried = True
+                        warn(f"Computed mempow nonce via {nonce_path}.")
+                        print("[2/3] Re-signing transaction...", flush=True)
+                        signed_tx = sign_tx(ctx, unsigned_tx, session)
+                        print("[3/3] Re-processing transaction...", flush=True)
+                        continue
+                    except Exception:
+                        if not _is_insufficient_fee_error(exc):
+                            raise
+
+                if fee_retried or not _is_insufficient_fee_error(exc):
+                    raise
+
+                recommended_fee = get_recommended_fee(ctx, unsigned_tx, session)
+                if recommended_fee <= current_fee:
+                    raise RuntimeError(
+                        f"Node reported INSUFFICIENT_FEE, but recommended fee "
+                        f"({recommended_fee}) is not greater than current fee ({current_fee})."
+                    ) from exc
+
+                current_fee = recommended_fee
+                fee_retried = True
+                nonce_retried = False
+                warn(f"Retrying with recommended fee: {d8(current_fee)} QORT")
+
+                print("\n[1/3] Rebuilding ARBITRARY APP transaction...", flush=True)
+                unsigned_tx = build_arbitrary_from_path(
+                    ctx,
+                    session,
+                    service=service,
+                    name=name,
+                    identifier=identifier or None,
+                    local_path=str(source_path.resolve()),
+                    title=title or None,
+                    description=description or None,
+                    tags=tags or None,
+                    category=category or None,
+                    fee_atomic=qort_to_atomic(current_fee),
+                    preview=preview,
+                )
+                print("[2/3] Re-signing transaction...", flush=True)
+                signed_tx = sign_tx(ctx, unsigned_tx, session)
+                print("[3/3] Re-processing transaction...", flush=True)
+
+    signature = _extract_tx_signature(result)
+    ok(f"ARBITRARY {service} publish submitted.")
+    if signature:
+        print("Signature: " + signature)
+    if ctx.debug:
+        print("Process response: " + str(result))
+
+
 def _fetch_chat_timeline(ctx: AppContext) -> List[Dict[str, Any]]:
     tx_group_id = int(ctx.chat.tx_group_id)
 
@@ -546,9 +718,8 @@ def run_chat_room(ctx: AppContext) -> None:
             pause()
 
 
-def tx_group_join(ctx: AppContext) -> None:
+def _submit_group_join(ctx: AppContext, group_id: int) -> None:
     ensure_wallet_config_ready(ctx)
-    group_id = prompt_int("Group ID [1]: ", default=1, minimum=1)
     fee, tx_group_id = _prompt_tx_common_inputs(default_fee=Decimal("0"))
     sender_pub = to_base58_pubkey(ctx.account.public_key)
 
@@ -563,6 +734,186 @@ def tx_group_join(ctx: AppContext) -> None:
         fee,
         tx_group_id,
     )
+
+
+def tx_group_join(ctx: AppContext) -> None:
+    group_id = prompt_int("Group ID [1]: ", default=1, minimum=1)
+    _submit_group_join(ctx, group_id)
+
+
+def tx_group_accept_invite(ctx: AppContext) -> None:
+    ensure_wallet_config_ready(ctx)
+
+    with make_session(ctx, include_api_key=False) as session:
+        invites = get_group_invites(ctx, ctx.account.account_address, session)
+        for invite in invites:
+            try:
+                group_id = int(invite.get("groupId", 0))
+            except (TypeError, ValueError):
+                continue
+            if group_id <= 0:
+                continue
+
+            invite["groupId"] = group_id
+            try:
+                group_info = get_group_info(ctx, group_id, session)
+            except requests.exceptions.RequestException:
+                group_info = {}
+            invite["_groupName"] = str(group_info.get("groupName", "") or "").strip()
+
+    invites = [
+        invite
+        for invite in invites
+        if isinstance(invite.get("groupId"), int) and invite["groupId"] > 0
+    ]
+    if not invites:
+        warn("No pending group invites found.")
+        pause()
+        return
+
+    while True:
+        print_banner(ctx.endpoint.base_url, "Accept Group Invite")
+        print_stat("Account", ctx.account.account_address)
+        print()
+        for index, invite in enumerate(invites, start=1):
+            group_id = int(invite["groupId"])
+            group_name = str(invite.get("_groupName", "") or f"Group {group_id}")
+            inviter = str(invite.get("inviter", "") or "Unknown")
+            expiry = _format_invite_expiry(invite.get("expiry"))
+            print_option(
+                str(index),
+                f"{group_name} (ID {group_id}) - from {inviter} - expires {expiry}",
+            )
+        print_option("0", "Back")
+        choice = read_menu_choice("Choose an invite: ")
+
+        if choice == "0":
+            return
+
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            selected = invites[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+            continue
+
+        group_id = int(selected["groupId"])
+        group_name = str(selected.get("_groupName", "") or f"Group {group_id}")
+        if not prompt_yes_no(
+            f"Accept invite to {group_name} (ID {group_id})?",
+            default_yes=False,
+        ):
+            continue
+
+        _submit_group_join(ctx, group_id)
+        pause()
+        return
+
+
+def _submit_group_join_request_approval(
+    ctx: AppContext,
+    group_id: int,
+    joiner: str,
+) -> None:
+    ensure_wallet_config_ready(ctx)
+
+    with make_session(ctx, include_api_key=False) as session:
+        current_requests = get_admin_group_join_requests(
+            ctx,
+            ctx.account.account_address,
+            session,
+        )
+    still_pending = any(
+        int(request.get("groupId", 0)) == group_id
+        and str(request.get("joiner", "") or "").strip() == joiner
+        for request in current_requests
+    )
+    if not still_pending:
+        raise RuntimeError(
+            "This join request is no longer pending. Refresh the request list and try again."
+        )
+
+    fee = prompt_decimal("Fee [0.00000000]: ", default=Decimal("0"))
+    tx_group_id = prompt_int(
+        f"txGroupId [{group_id}]: ",
+        default=group_id,
+        minimum=0,
+    )
+    sender_pub = to_base58_pubkey(ctx.account.public_key)
+
+    _submit_builder_transaction(
+        ctx,
+        "/groups/invite",
+        "GROUP_INVITE join approval",
+        {
+            "adminPublicKey": sender_pub,
+            "groupId": group_id,
+            "invitee": joiner,
+            "timeToLive": 0,
+        },
+        d8(fee),
+        tx_group_id,
+    )
+
+
+def tx_group_review_join_requests(ctx: AppContext) -> None:
+    ensure_wallet_config_ready(ctx)
+
+    with make_session(ctx, include_api_key=False) as session:
+        join_requests = get_admin_group_join_requests(
+            ctx,
+            ctx.account.account_address,
+            session,
+        )
+
+    if not join_requests:
+        warn("No pending join requests found for groups you can approve.")
+        pause()
+        return
+
+    while True:
+        print_banner(ctx.endpoint.base_url, "Pending Group Join Requests")
+        print_stat("Approver", ctx.account.account_address)
+        print()
+        for index, join_request in enumerate(join_requests, start=1):
+            group_id = int(join_request["groupId"])
+            group_name = str(
+                join_request.get("groupName", "") or f"Group {group_id}"
+            ).strip()
+            joiner = str(join_request.get("joiner", "") or "").strip()
+            print_option(
+                str(index),
+                f"{group_name} (ID {group_id}) - applicant {joiner}",
+            )
+        print_option("0", "Back")
+        choice = read_menu_choice("Choose a join request: ")
+
+        if choice == "0":
+            return
+
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            selected = join_requests[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+            continue
+
+        group_id = int(selected["groupId"])
+        group_name = str(selected.get("groupName", "") or f"Group {group_id}").strip()
+        joiner = str(selected.get("joiner", "") or "").strip()
+        if not prompt_yes_no(
+            f"Approve {joiner} to join {group_name} (ID {group_id})?",
+            default_yes=False,
+        ):
+            continue
+
+        _submit_group_join_request_approval(ctx, group_id, joiner)
+        pause()
+        return
 
 
 def tx_group_create(ctx: AppContext) -> None:
@@ -925,14 +1276,15 @@ def tool_chat(ctx: AppContext) -> None:
         pause()
 
 
-def tool_transactions(ctx: AppContext) -> None:
+def tool_groups(ctx: AppContext) -> None:
     while True:
-        print_banner(ctx.endpoint.base_url, "Transactions")
+        print_banner(ctx.endpoint.base_url, "Groups")
         print_stat("Account", ctx.account.account_address)
         print()
         print_option("1", "Join group (/groups/join)")
         print_option("2", "Create group (/groups/create)")
-        print_option("3", "Register name (/names/register)")
+        print_option("3", "View / accept invites sent to this account")
+        print_option("4", "Review join requests for groups you manage")
         print_option("0", "Back")
         choice = read_menu_choice("Choose an option: ")
 
@@ -948,7 +1300,491 @@ def tool_transactions(ctx: AppContext) -> None:
                 pause()
                 continue
             if choice == "3":
-                tx_name_register(ctx)
+                tx_group_accept_invite(ctx)
+                continue
+            if choice == "4":
+                tx_group_review_join_requests(ctx)
+                continue
+        except Exception as exc:
+            error("Action failed:")
+            if _is_node_unreachable_error(exc):
+                _print_node_unreachable_hint(ctx)
+            else:
+                print(pretty_exception(exc))
+                _print_debug_traceback(ctx, exc)
+            pause()
+            continue
+
+        warn("Unknown option.")
+        pause()
+
+
+def tool_register_name(ctx: AppContext) -> None:
+    print_banner(ctx.endpoint.base_url, "Register Name")
+    print_stat("Account", ctx.account.account_address)
+    print()
+    tx_name_register(ctx)
+    pause()
+
+
+def _prompt_qdn_resource(ctx: AppContext) -> tuple[str, str, str]:
+    while True:
+        service = prompt_str("Service [APP]: ", "APP").strip().upper()
+        if service in QDN_SERVICES:
+            break
+        warn(f"Unknown QDN service: {service}")
+        print("Supported services:")
+        print(", ".join(QDN_SERVICES))
+
+    suggested_name = (ctx.account.name or "").strip()
+    if is_placeholder(suggested_name) or looks_like_qortal_address(suggested_name):
+        suggested_name = ""
+
+    if suggested_name:
+        name = prompt_str(f"Registered name [{suggested_name}]: ", suggested_name).strip()
+    else:
+        name = prompt_str("Registered name: ").strip()
+    if not name:
+        raise RuntimeError("Registered name cannot be empty.")
+
+    identifier = prompt_str("Identifier [default]: ", "default").strip()
+    if not identifier:
+        identifier = "default"
+    return service, name, identifier
+
+
+def _qdn_resource_tuple(resource: Dict[str, Any]) -> tuple[str, str, str] | None:
+    service = str(resource.get("service", "") or "").strip().upper()
+    name = str(resource.get("name", "") or "").strip()
+    identifier = str(resource.get("identifier", "") or "default").strip() or "default"
+    if service not in QDN_SERVICES or not name:
+        return None
+    return service, name, identifier
+
+
+def _qdn_resource_detail(resource: Dict[str, Any]) -> str:
+    details: List[str] = []
+    status = resource.get("status")
+    if isinstance(status, dict):
+        status_label = str(
+            status.get("title") or status.get("status") or status.get("id") or ""
+        ).strip()
+        if status_label:
+            details.append(status_label)
+
+    metadata = resource.get("metadata")
+    if isinstance(metadata, dict):
+        title = str(metadata.get("title", "") or "").strip()
+        if title:
+            details.append(title)
+
+    return " - ".join(details)
+
+
+def select_qdn_resource(
+    ctx: AppContext,
+    *,
+    hosted_only: bool,
+) -> tuple[str, str, str] | None:
+    query = prompt_str("Search name or identifier [all]: ", "").strip()
+    while True:
+        service = prompt_str("Service [any]: ", "").strip().upper()
+        if not service or service in QDN_SERVICES:
+            break
+        warn(f"Unknown QDN service: {service}")
+
+    owned_names: List[str] | None = None
+    if not hosted_only:
+        with make_session(ctx, include_api_key=False) as session:
+            owned_names = get_account_names(
+                ctx,
+                ctx.account.account_address,
+                session,
+                limit=500,
+            )
+        if not owned_names:
+            warn("No registered names owned by the configured wallet were found.")
+            return None
+
+    offset = 0
+    while True:
+        with make_session(ctx, include_api_key=hosted_only) as session:
+            if hosted_only:
+                all_rows = get_hosted_arbitrary_resources(
+                    ctx,
+                    session,
+                    query=query,
+                    limit=500,
+                    offset=0,
+                )
+                if service:
+                    all_rows = [
+                        row
+                        for row in all_rows
+                        if str(row.get("service", "") or "").upper() == service
+                    ]
+                rows = all_rows[offset : offset + QDN_RESOURCE_PAGE_SIZE]
+                has_next_page = offset + QDN_RESOURCE_PAGE_SIZE < len(all_rows)
+            else:
+                rows = search_arbitrary_resources(
+                    ctx,
+                    session,
+                    query=query,
+                    service=service,
+                    names=owned_names,
+                    limit=QDN_RESOURCE_PAGE_SIZE,
+                    offset=offset,
+                )
+                has_next_page = len(rows) == QDN_RESOURCE_PAGE_SIZE
+
+        resources = [
+            (row, resource_tuple)
+            for row in rows
+            if (resource_tuple := _qdn_resource_tuple(row)) is not None
+        ]
+
+        print_banner(
+            ctx.endpoint.base_url,
+            "Hosted QDN Resources" if hosted_only else "Owned QDN Resources",
+        )
+        print_stat("Search", query or "All")
+        print_stat("Service", service or "Any")
+        print_stat("Offset", offset)
+        print()
+
+        if not resources:
+            warn("No matching resources found on this page.")
+        else:
+            for index, (row, resource_tuple) in enumerate(resources, start=1):
+                resource_service, resource_name, resource_identifier = resource_tuple
+                label = f"{resource_service} / {resource_name} / {resource_identifier}"
+                detail = _qdn_resource_detail(row)
+                if detail:
+                    label += f" - {detail}"
+                print_option(str(index), label)
+
+        if has_next_page:
+            print_option("n", "Next page")
+        if offset > 0:
+            print_option("p", "Previous page")
+        print_option("0", "Cancel")
+        choice = read_menu_choice("Choose a resource: ").lower()
+
+        if choice == "0":
+            return None
+        if choice == "n" and has_next_page:
+            offset += QDN_RESOURCE_PAGE_SIZE
+            continue
+        if choice == "p" and offset > 0:
+            offset = max(0, offset - QDN_RESOURCE_PAGE_SIZE)
+            continue
+
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            return resources[selected_index][1]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+
+
+def choose_qdn_resource(
+    ctx: AppContext,
+    *,
+    hosted_only: bool,
+) -> tuple[str, str, str] | None:
+    print_option("1", "Search and select a resource")
+    print_option("2", "Enter service/name/identifier manually")
+    print_option("0", "Cancel")
+    choice = read_menu_choice("Choose resource input: ")
+    if choice == "0":
+        return None
+    if choice == "1":
+        return select_qdn_resource(ctx, hosted_only=hosted_only)
+    if choice == "2":
+        return _prompt_qdn_resource(ctx)
+    warn("Unknown option.")
+    return None
+
+
+def browse_qdn_resources(ctx: AppContext) -> None:
+    print_option("1", "Find an owned resource to delete on-chain")
+    print_option("2", "Find a hosted resource to delete from this node")
+    print_option("0", "Back")
+    choice = read_menu_choice("Choose a lookup scope: ")
+    if choice == "0":
+        return
+    if choice not in {"1", "2"}:
+        warn("Unknown option.")
+        return
+
+    hosted_only = choice == "2"
+    if hosted_only:
+        ensure_api_key(ctx)
+
+    selected = select_qdn_resource(ctx, hosted_only=hosted_only)
+    if selected is None:
+        return
+
+    if hosted_only:
+        _delete_selected_qdn_resource_locally(ctx, selected)
+    else:
+        _delete_selected_qdn_resource_on_chain(ctx, selected)
+
+
+def _submit_arbitrary_delete_transaction(
+    ctx: AppContext,
+    service: str,
+    name: str,
+    identifier: str,
+    fee: Decimal,
+) -> None:
+    ensure_wallet_config_ready(ctx)
+    normalized_identifier = None if identifier.lower() == "default" else identifier
+    fee_atomic = qort_to_atomic(fee)
+
+    with make_session(ctx, include_api_key=True) as session:
+        name_info = get_name_info(ctx, name, session)
+        owner = str(name_info.get("owner", "") or "").strip()
+        if not owner:
+            raise RuntimeError(f"Unable to determine owner for registered name: {name}")
+        if owner != ctx.account.account_address:
+            raise RuntimeError(
+                f"Name '{name}' is owned by {owner}, not the configured wallet "
+                f"{ctx.account.account_address}."
+            )
+
+        print("\n[1/3] Building ARBITRARY DELETE transaction...", flush=True)
+        unsigned_tx = build_arbitrary_delete(
+            ctx,
+            service,
+            name,
+            normalized_identifier,
+            fee_atomic,
+            session,
+        )
+        print("[2/3] Signing transaction...", flush=True)
+        signed_tx = sign_tx(ctx, unsigned_tx, session)
+        print("[3/3] Processing transaction...", flush=True)
+
+        fee_retried = False
+        nonce_retried = False
+        while True:
+            try:
+                result = process_tx(ctx, signed_tx, session)
+                break
+            except Exception as exc:
+                should_try_mempow = (
+                    _is_insufficient_fee_error(exc)
+                    or is_nonce_or_pow_error(exc)
+                    or _is_invalid_signature_error(exc)
+                )
+                if not nonce_retried and should_try_mempow:
+                    try:
+                        print("\n[1/3] Computing arbitrary transaction nonce...", flush=True)
+                        unsigned_tx, nonce_path = compute_transaction_nonce(
+                            ctx,
+                            unsigned_tx,
+                            session,
+                            compute_paths=("/arbitrary/compute",),
+                        )
+                        nonce_retried = True
+                        warn(f"Computed mempow nonce via {nonce_path}.")
+                        print("[2/3] Re-signing transaction...", flush=True)
+                        signed_tx = sign_tx(ctx, unsigned_tx, session)
+                        print("[3/3] Re-processing transaction...", flush=True)
+                        continue
+                    except Exception:
+                        if not _is_insufficient_fee_error(exc):
+                            raise
+
+                if fee_retried or not _is_insufficient_fee_error(exc):
+                    raise
+
+                recommended_fee = get_recommended_fee(ctx, unsigned_tx, session)
+                if recommended_fee <= fee:
+                    raise RuntimeError(
+                        f"Node reported INSUFFICIENT_FEE, but recommended fee "
+                        f"({recommended_fee}) is not greater than current fee ({fee})."
+                    ) from exc
+
+                fee = recommended_fee
+                fee_atomic = qort_to_atomic(fee)
+                fee_retried = True
+                nonce_retried = False
+                warn(f"Retrying with recommended fee: {d8(fee)} QORT")
+
+                print("\n[1/3] Rebuilding ARBITRARY DELETE transaction...", flush=True)
+                unsigned_tx = build_arbitrary_delete(
+                    ctx,
+                    service,
+                    name,
+                    normalized_identifier,
+                    fee_atomic,
+                    session,
+                )
+                print("[2/3] Re-signing transaction...", flush=True)
+                signed_tx = sign_tx(ctx, unsigned_tx, session)
+                print("[3/3] Re-processing transaction...", flush=True)
+
+    signature = _extract_tx_signature(result)
+    ok("ARBITRARY DELETE transaction submitted.")
+    if signature:
+        print("Signature: " + signature)
+
+
+def _delete_selected_qdn_resource_on_chain(
+    ctx: AppContext,
+    selected: tuple[str, str, str],
+) -> None:
+    service, name, identifier = selected
+    fee = prompt_decimal("Fee [0.00000000]: ", default=Decimal("0"))
+
+    print()
+    print_stat("Service", service)
+    print_stat("Name", name)
+    print_stat("Identifier", identifier)
+    print_stat("Fee", f"{d8(fee)} QORT")
+    warn("This publishes a network-visible deletion transaction.")
+    print("The resource can be published again later, but the deletion remains in history.")
+    if not prompt_yes_no("Publish this QDN resource deletion?", default_yes=False):
+        warn("Cancelled.")
+        return
+
+    _submit_arbitrary_delete_transaction(ctx, service, name, identifier, fee)
+
+
+def delete_qdn_resource_on_chain(ctx: AppContext) -> None:
+    selected = choose_qdn_resource(ctx, hosted_only=False)
+    if selected is None:
+        warn("Cancelled.")
+        return
+    _delete_selected_qdn_resource_on_chain(ctx, selected)
+
+
+def _delete_selected_qdn_resource_locally(
+    ctx: AppContext,
+    selected: tuple[str, str, str],
+) -> None:
+    service, name, identifier = selected
+
+    print()
+    print_stat("Service", service)
+    print_stat("Name", name)
+    print_stat("Identifier", identifier)
+    warn("This removes only this node's cached/hosted copy.")
+    print("The resource remains on-chain and can be downloaded again.")
+    if not prompt_yes_no("Delete the local QDN resource data?", default_yes=False):
+        warn("Cancelled.")
+        return
+
+    with make_session(ctx, include_api_key=True) as session:
+        deleted = delete_local_arbitrary_resource(
+            ctx,
+            service,
+            name,
+            identifier,
+            session,
+        )
+
+    if deleted:
+        ok("Local cached/hosted resource data deleted.")
+    else:
+        warn("The node reported that no local resource data was deleted.")
+
+
+def delete_qdn_resource_locally(ctx: AppContext) -> None:
+    ensure_api_key(ctx)
+    selected = choose_qdn_resource(ctx, hosted_only=True)
+    if selected is None:
+        warn("Cancelled.")
+        return
+    _delete_selected_qdn_resource_locally(ctx, selected)
+
+
+def publish_qdn_app(ctx: AppContext) -> None:
+    suggested_name = (ctx.account.name or "").strip()
+    if is_placeholder(suggested_name) or looks_like_qortal_address(suggested_name):
+        suggested_name = ""
+
+    if suggested_name:
+        name = prompt_str(f"Registered name [{suggested_name}]: ", suggested_name).strip()
+    else:
+        name = prompt_str("Registered name: ").strip()
+    if not name:
+        raise RuntimeError("Registered name cannot be empty.")
+
+    identifier = prompt_str("Identifier [default]: ", "default").strip()
+    if identifier.lower() in {"none", "null"}:
+        identifier = ""
+    elif not identifier:
+        identifier = "default"
+    elif identifier.lower() != "default":
+        warn("Non-default APP identifiers may fail to open in some Qortium Home builds.")
+
+    local_path = prompt_str("Local app path (folder or zip): ").strip()
+    if not local_path:
+        raise RuntimeError("Local app path cannot be empty.")
+
+    title = prompt_str("Title [optional]: ", "").strip()
+    description = prompt_str("Description [optional]: ", "").strip()
+    tags = _parse_arbitrary_tags(prompt_str("Tags CSV [optional]: ", ""))
+    category = prompt_str("Category [UNCATEGORIZED]: ", "UNCATEGORIZED").strip().upper()
+    fee = prompt_decimal("Fee [0.00000000]: ", default=Decimal("0"))
+    preview = prompt_yes_no("Preview mode?", default_yes=False)
+
+    print()
+    print_stat("Service", "APP")
+    print_stat("Name", name)
+    print_stat("Identifier", identifier or "(none)")
+    print_stat("Path", str(Path(local_path).expanduser()))
+    print_stat("Fee", f"{d8(fee)} QORT")
+    if not prompt_yes_no("Publish this APP to QDN?", default_yes=False):
+        warn("Cancelled.")
+        return
+
+    _submit_arbitrary_publish_transaction(
+        ctx,
+        service="APP",
+        name=name,
+        identifier=identifier,
+        local_path=local_path,
+        title=title,
+        description=description,
+        tags=tags,
+        category=category,
+        fee=fee,
+        preview=preview,
+    )
+
+
+def tool_qdn_resources(ctx: AppContext) -> None:
+    while True:
+        print_banner(ctx.endpoint.base_url, "QDN Resources")
+        print_option("1", "Look up and delete a QDN resource")
+        print_option("2", "Delete resource on-chain")
+        print_option("3", "Delete local cached/hosted copy")
+        print_option("4", "Publish APP")
+        print_option("0", "Back")
+        choice = read_menu_choice("Choose an option: ")
+
+        try:
+            if choice == "0":
+                return
+            if choice == "1":
+                browse_qdn_resources(ctx)
+                pause()
+                continue
+            if choice == "2":
+                delete_qdn_resource_on_chain(ctx)
+                pause()
+                continue
+            if choice == "3":
+                delete_qdn_resource_locally(ctx)
+                pause()
+                continue
+            if choice == "4":
+                publish_qdn_app(ctx)
                 pause()
                 continue
         except Exception as exc:
@@ -965,6 +1801,76 @@ def tool_transactions(ctx: AppContext) -> None:
         pause()
 
 
+def export_wallet_backup(ctx: AppContext) -> None:
+    if is_placeholder(ctx.account.private_key):
+        raise RuntimeError("Private key is missing. Run setup/reconfigure first.")
+    if not looks_like_qortal_address(ctx.account.account_address):
+        raise RuntimeError(
+            f"ACCOUNT_ADDRESS does not look valid: {ctx.account.account_address}"
+        )
+
+    print()
+    print(
+        "This creates a Qortium Home version-3 wallet backup from the configured "
+        "private key."
+    )
+    print(
+        "Private-key wallets contain one QORT address and cannot derive additional "
+        "addresses."
+    )
+
+    suggested_wallet_name = (ctx.account.name or "").strip()
+    if is_placeholder(suggested_wallet_name) or looks_like_qortal_address(
+        suggested_wallet_name
+    ):
+        suggested_wallet_name = "wallet"
+    wallet_name = prompt_str(
+        f"Wallet name [{suggested_wallet_name}]: ",
+        suggested_wallet_name,
+    ).strip()
+    if not wallet_name:
+        wallet_name = "wallet"
+
+    warn("The backup password is required to restore this wallet.")
+    password = prompt_secret("Backup password: ")
+    if not password:
+        warn("Wallet backup cancelled.")
+        return
+
+    confirmation = prompt_secret("Confirm backup password: ")
+    if password != confirmation:
+        warn("Passwords do not match.")
+        return
+
+    default_path = default_wallet_backup_path(
+        ctx.account.account_address,
+        wallet_name=wallet_name,
+    )
+    raw_path = prompt_str(
+        f"Save path [{default_path}]: ",
+        str(default_path),
+    ).strip()
+    output_path = Path(raw_path).expanduser()
+
+    if output_path.exists() and not prompt_yes_no(
+        f"{output_path} already exists. Overwrite?",
+        default_yes=False,
+    ):
+        warn("Wallet backup cancelled.")
+        return
+
+    print("Encrypting Qortium Home private-key wallet backup...", flush=True)
+    backup = generate_wallet_backup_from_private_key(
+        ctx.account.private_key,
+        ctx.account.account_address,
+        password,
+    )
+    saved_path = write_wallet_backup(output_path, backup)
+    ok("Qortium Home-compatible account backup saved.")
+    print(f"File: {saved_path}")
+    warn("Store this file and its password securely. Neither can replace the other.")
+
+
 def tool_wallet(ctx: AppContext) -> None:
     while True:
         print_banner(ctx.endpoint.base_url, "Wallet")
@@ -975,6 +1881,7 @@ def tool_wallet(ctx: AppContext) -> None:
         if ENABLE_SEND_PAYMENTS:
             print_option("3", "Send QORT payment")
             print_option("4", "Send asset transfer")
+        print_option("5", "Save Qortium Home private-key wallet backup")
         print_option("0", "Back")
         choice = read_menu_choice("Choose an option: ")
 
@@ -997,6 +1904,10 @@ def tool_wallet(ctx: AppContext) -> None:
                 send_asset_transfer(ctx)
                 pause()
                 continue
+            if choice == "5":
+                export_wallet_backup(ctx)
+                pause()
+                continue
         except Exception as exc:
             error("Action failed:")
             if _is_node_unreachable_error(exc):
@@ -1015,9 +1926,17 @@ def build_tool_plugins() -> List[ToolPlugin]:
     tools = [
         ToolPlugin("1", "Node", "Node status and admin controls", tool_node),
         ToolPlugin("2", "Chat", "Chat room + settings", tool_chat),
-        ToolPlugin("3", "Transactions", "Groups and names", tool_transactions),
+        ToolPlugin("3", "Groups", "Join, create, and accept invites", tool_groups),
+        ToolPlugin("4", "Register Name", "Register a Qortal name", tool_register_name),
     ]
     if ENABLE_WALLET_TOOL:
-        wallet_key = str(len(tools) + 1)
-        tools.append(ToolPlugin(wallet_key, "Wallet", "Balance and payments", tool_wallet))
+        tools.append(ToolPlugin("5", "Wallet", "Balance and payments", tool_wallet))
+    tools.append(
+        ToolPlugin(
+            "6",
+            "QDN Resources",
+            "Publish APPs or delete arbitrary resources",
+            tool_qdn_resources,
+        )
+    )
     return tools

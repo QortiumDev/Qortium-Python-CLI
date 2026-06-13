@@ -33,6 +33,9 @@ jobs:
       - name: Compile sources
         run: python -m compileall -q qortium_cli main.py
 
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
       - name: Check helper commands
         run: |
           python -m qortium_cli.tx_builder --help

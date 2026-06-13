@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from qortium_cli.constants import C_TEXT, RESET
 from qortium_cli.crypto import derive_private_key_from_seed_phrase
 from qortium_cli.models import AccountSettings, AppContext, EndpointSettings
@@ -10,10 +12,12 @@ from qortium_cli.services import (
 )
 from qortium_cli.storage import write_config_file, write_endpoint_file
 from qortium_cli.ui import (
+    error,
     ok,
     pause,
     print_option,
     print_setup_banner,
+    print_stat,
     prompt_int,
     prompt_secret,
     prompt_str,
@@ -44,11 +48,167 @@ def current_config_values_ready(ctx: AppContext) -> bool:
     return True
 
 
-def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
-    if (not force) and current_endpoint_values_ready(ctx) and current_config_values_ready(ctx):
+def _prompt_private_key() -> str:
+    print()
+    print_option("1", "Use private key")
+    print_option("2", "Use seed phrase")
+    mode = read_menu_choice("Choose key input mode [1/2]: ").strip() or "1"
+    if mode not in {"1", "2"}:
+        mode = "1"
+
+    if mode == "1":
+        private_key = prompt_secret("Private key: ").strip()
+    else:
+        seed_phrase = prompt_secret("Seed phrase: ").strip()
+        private_key = derive_private_key_from_seed_phrase(seed_phrase)
+        ok("Derived private key from seed phrase.")
+
+    if not private_key:
+        raise RuntimeError("Private key is empty.")
+    return private_key
+
+
+def _account_from_private_key(ctx: AppContext, private_key: str, api_key: str) -> AccountSettings:
+    public_key = qortal_public_key_from_private(
+        ctx.endpoint.base_url,
+        private_key,
+        ctx.endpoint.timeout_seconds,
+    )
+    address = qortal_address_from_public(
+        ctx.endpoint.base_url,
+        public_key,
+        ctx.endpoint.timeout_seconds,
+    )
+    primary_name = qortal_primary_name_for_address(
+        ctx.endpoint.base_url,
+        address,
+        ctx.endpoint.timeout_seconds,
+    )
+    return AccountSettings(
+        name=primary_name or address,
+        account_address=address,
+        public_key=public_key,
+        private_key=private_key,
+        api_key=api_key,
+    )
+
+
+def configure_endpoint_url(ctx: AppContext) -> None:
+    current_url = ctx.endpoint.base_url
+    while True:
+        raw_url = prompt_str(
+            f"New endpoint URL [{current_url}] (press Enter to cancel): ",
+            current_url,
+        )
+        try:
+            base_url = normalize_node_url(raw_url)
+            break
+        except ValueError as exc:
+            warn(str(exc))
+
+    if base_url == current_url:
+        warn("Endpoint URL unchanged.")
         return
 
-    print_setup_banner("First Run Setup" if not force else "Reconfigure")
+    ctx.endpoint = replace(ctx.endpoint, base_url=base_url)
+    write_endpoint_file(ctx.settings_dir, ctx.endpoint)
+    ok("Endpoint URL updated.")
+
+
+def configure_timeout(ctx: AppContext) -> None:
+    current_timeout = ctx.endpoint.timeout_seconds
+    timeout = prompt_int(
+        f"New timeout seconds [{current_timeout}]: ",
+        default=current_timeout,
+        minimum=1,
+    )
+    if timeout == current_timeout:
+        warn("Timeout unchanged.")
+        return
+
+    ctx.endpoint = replace(ctx.endpoint, timeout_seconds=timeout)
+    write_endpoint_file(ctx.settings_dir, ctx.endpoint)
+    ok("Request timeout updated.")
+
+
+def configure_api_key(ctx: AppContext) -> None:
+    api_key = prompt_secret("New API key (press Enter to cancel): ").strip()
+    if not api_key:
+        warn("API key unchanged.")
+        return
+
+    ctx.account = replace(ctx.account, api_key=api_key)
+    write_config_file(ctx.settings_dir, ctx.account)
+    ok("API key updated. Wallet keys were not changed.")
+
+
+def configure_wallet_identity(ctx: AppContext) -> None:
+    private_key = _prompt_private_key()
+    api_key = (ctx.account.api_key or "").strip()
+    account = _account_from_private_key(ctx, private_key, api_key)
+    write_config_file(ctx.settings_dir, account)
+    ctx.account = account
+    ok("Wallet identity updated.")
+    print(C_TEXT + f"Account: {ctx.account.account_address}" + RESET)
+
+
+def run_reconfigure_menu(ctx: AppContext) -> None:
+    while True:
+        print_setup_banner("Reconfigure")
+        print_stat("Endpoint", ctx.endpoint.base_url)
+        print_stat("Timeout", f"{ctx.endpoint.timeout_seconds} seconds")
+        print_stat("Account", ctx.account.account_address)
+        print_stat(
+            "API Key",
+            "Configured" if not is_placeholder(ctx.account.api_key) else "Missing",
+        )
+        print()
+        print_option("1", "Change endpoint URL")
+        print_option("2", "Change request timeout")
+        print_option("3", "Change API key")
+        print_option("4", "Change wallet / account")
+        print_option("0", "Back")
+        choice = read_menu_choice("Choose an option: ")
+
+        if choice == "0":
+            return
+
+        try:
+            if choice == "1":
+                configure_endpoint_url(ctx)
+                pause()
+                continue
+            if choice == "2":
+                configure_timeout(ctx)
+                pause()
+                continue
+            if choice == "3":
+                configure_api_key(ctx)
+                pause()
+                continue
+            if choice == "4":
+                configure_wallet_identity(ctx)
+                pause()
+                continue
+        except Exception as exc:
+            error("Reconfiguration failed:")
+            print(str(exc))
+            pause()
+            continue
+
+        warn("Unknown option.")
+        pause()
+
+
+def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
+    if force:
+        run_reconfigure_menu(ctx)
+        return
+
+    if current_endpoint_values_ready(ctx) and current_config_values_ready(ctx):
+        return
+
+    print_setup_banner("First Run Setup")
     print(C_TEXT + "Let's create endpoint.py and config.py in:" + RESET)
     print(C_TEXT + f"  {ctx.settings_dir}" + RESET)
     print()
@@ -88,35 +248,8 @@ def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
     if not api_key:
         raise RuntimeError("API key is required to continue setup.")
 
-    print()
-    print_option("1", "Use private key")
-    print_option("2", "Use seed phrase")
-    mode = read_menu_choice("Choose key input mode [1/2]: ").strip() or "1"
-    if mode not in {"1", "2"}:
-        mode = "1"
-
-    if mode == "1":
-        private_key = prompt_secret("Private key: ")
-    else:
-        seed_phrase = prompt_secret("Seed phrase: ")
-        private_key = derive_private_key_from_seed_phrase(seed_phrase)
-        ok("Derived private key from seed phrase.")
-
-    if not private_key:
-        raise RuntimeError("Private key is empty.")
-
-    public_key = qortal_public_key_from_private(base_url, private_key, timeout)
-    address = qortal_address_from_public(base_url, public_key, timeout)
-    primary_name = qortal_primary_name_for_address(base_url, address, timeout)
-    display_name = primary_name or address
-
-    account = AccountSettings(
-        name=display_name,
-        account_address=address,
-        public_key=public_key,
-        private_key=private_key,
-        api_key=api_key,
-    )
+    private_key = _prompt_private_key()
+    account = _account_from_private_key(ctx, private_key, api_key)
     write_config_file(ctx.settings_dir, account)
     ctx.account = account
 

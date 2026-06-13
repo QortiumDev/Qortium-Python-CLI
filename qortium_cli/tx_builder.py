@@ -13,9 +13,11 @@ from qortium_cli.crypto import to_base58_pubkey
 from qortium_cli.models import AppContext
 from qortium_cli.paths import project_root_dir, resolve_settings_dir
 from qortium_cli.services import (
+    build_arbitrary_from_path,
     build_raw_transaction,
     compute_transaction_nonce,
     get_last_reference,
+    get_name_info,
     get_recommended_fee,
     get_timestamp,
     is_nonce_or_pow_error,
@@ -24,7 +26,7 @@ from qortium_cli.services import (
     sign_tx,
 )
 from qortium_cli.storage import load_account_settings, load_chat_settings, load_endpoint_settings
-from qortium_cli.utils import d8
+from qortium_cli.utils import d8, qort_to_atomic
 from qortium_cli.validators import is_placeholder, normalize_node_url
 
 APPROVAL_THRESHOLDS = ("NONE", "ONE", "PCT20", "PCT40", "PCT60", "PCT80", "PCT100")
@@ -168,6 +170,46 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Name data string (default: {}).",
     )
 
+    app_publish = subparsers.add_parser(
+        "app-publish",
+        help="Build/sign/submit APP publish via /arbitrary/APP/{name}/{identifier}",
+    )
+    app_publish.add_argument(
+        "--name",
+        required=True,
+        help="Registered name that owns the APP resource.",
+    )
+    app_publish.add_argument(
+        "--identifier",
+        default="default",
+        help="Resource identifier (default: default). Use empty string to omit.",
+    )
+    app_publish.add_argument(
+        "--path",
+        required=True,
+        help=(
+            "Local folder or zip path to publish. "
+            "Zip files are unpacked and published as multi-file APPs."
+        ),
+    )
+    app_publish.add_argument("--title", default="", help="Optional metadata title.")
+    app_publish.add_argument("--description", default="", help="Optional metadata description.")
+    app_publish.add_argument(
+        "--tags",
+        default="",
+        help="Optional comma-separated tags (max 5, max 20 characters each).",
+    )
+    app_publish.add_argument(
+        "--category",
+        default="UNCATEGORIZED",
+        help="QDN category enum value (default: UNCATEGORIZED).",
+    )
+    app_publish.add_argument(
+        "--preview",
+        action="store_true",
+        help="Enable preview mode when building the ARBITRARY transaction.",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -212,6 +254,16 @@ def _normalize_fee(raw_fee: str) -> str:
     if fee < 0:
         raise RuntimeError("Fee cannot be negative.")
     return d8(fee)
+
+
+def _parse_arbitrary_tags(raw_tags: str) -> list[str]:
+    tags = [part.strip() for part in str(raw_tags or "").split(",") if part.strip()]
+    if len(tags) > 5:
+        raise RuntimeError("QDN supports at most 5 tags.")
+    for tag in tags:
+        if len(tag) > 20:
+            raise RuntimeError(f"QDN tag exceeds 20 characters: {tag}")
+    return tags
 
 
 def _require_wallet_values(ctx: AppContext, require_private: bool = True) -> None:
@@ -342,6 +394,162 @@ def _build_payload_and_path(
     raise RuntimeError(f"Unsupported command: {args.command}")
 
 
+def _run_app_publish(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    session: requests.Session,
+) -> int:
+    name = str(args.name or "").strip()
+    if not name:
+        raise RuntimeError("--name cannot be empty.")
+
+    source_path = Path(str(args.path)).expanduser()
+    if not source_path.exists():
+        raise RuntimeError(f"Local path does not exist: {source_path}")
+
+    identifier = str(args.identifier or "").strip()
+    if identifier.lower() in {"none", "null"}:
+        identifier = ""
+    elif identifier.lower() != "default":
+        print(
+            "Warning: non-default APP identifiers may fail to open in some Qortium Home builds.",
+            file=sys.stderr,
+        )
+
+    name_info = get_name_info(ctx, name, session)
+    owner = str(name_info.get("owner", "") or "").strip()
+    if not owner:
+        raise RuntimeError(f"Unable to determine owner for registered name: {name}")
+    if owner != ctx.account.account_address:
+        raise RuntimeError(
+            f"Name '{name}' is owned by {owner}, not the configured wallet "
+            f"{ctx.account.account_address}."
+        )
+
+    current_fee = Decimal(_normalize_fee(args.fee))
+    tags = _parse_arbitrary_tags(str(args.tags))
+    title = str(args.title or "").strip()
+    description = str(args.description or "").strip()
+    category = str(args.category or "").strip().upper()
+    source_resolved = str(source_path.resolve())
+
+    publication = {
+        "service": "APP",
+        "name": name,
+        "identifier": identifier or None,
+        "path": source_resolved,
+        "title": title or None,
+        "description": description or None,
+        "tags": tags,
+        "category": category or None,
+        "fee": d8(current_fee),
+        "preview": bool(args.preview),
+    }
+    _write_text_file(args.out_payload, json.dumps(publication, indent=2))
+
+    unsigned_tx = build_arbitrary_from_path(
+        ctx,
+        session,
+        service="APP",
+        name=name,
+        identifier=identifier or None,
+        local_path=source_resolved,
+        title=title or None,
+        description=description or None,
+        tags=tags or None,
+        category=category or None,
+        fee_atomic=qort_to_atomic(current_fee) if current_fee > 0 else None,
+        preview=bool(args.preview),
+    )
+    _write_text_file(args.out_unsigned, unsigned_tx)
+
+    if args.build_only:
+        print("Unsigned transaction bytes:")
+        print(unsigned_tx)
+        return 0
+
+    signed_tx = sign_tx(ctx, unsigned_tx, session)
+    _write_text_file(args.out_signed, signed_tx)
+
+    if args.skip_process:
+        print("Signed transaction bytes:")
+        print(signed_tx)
+        return 0
+
+    fee_retried = False
+    nonce_retried = False
+    while True:
+        try:
+            result = process_tx(ctx, signed_tx, session)
+            break
+        except Exception as exc:
+            should_try_mempow = (
+                _is_insufficient_fee_error(exc)
+                or is_nonce_or_pow_error(exc)
+                or _is_invalid_signature_error(exc)
+            )
+            if bool(args.auto_nonce) and not nonce_retried and should_try_mempow:
+                try:
+                    unsigned_tx, nonce_path = compute_transaction_nonce(
+                        ctx,
+                        unsigned_tx,
+                        session,
+                        compute_paths=("/arbitrary/compute",),
+                    )
+                    nonce_retried = True
+                    print(f"Computed mempow nonce via {nonce_path}.")
+                    _write_text_file(args.out_unsigned, unsigned_tx)
+                    signed_tx = sign_tx(ctx, unsigned_tx, session)
+                    _write_text_file(args.out_signed, signed_tx)
+                    continue
+                except Exception:
+                    if not _is_insufficient_fee_error(exc):
+                        raise
+
+            if fee_retried or not _is_insufficient_fee_error(exc):
+                raise
+
+            recommended_fee = get_recommended_fee(ctx, unsigned_tx, session)
+            if recommended_fee <= current_fee:
+                raise RuntimeError(
+                    f"Node reported INSUFFICIENT_FEE, but recommended fee ({recommended_fee}) "
+                    f"is not greater than current fee ({current_fee})."
+                ) from exc
+
+            current_fee = recommended_fee
+            fee_retried = True
+            nonce_retried = False
+            print(f"Insufficient fee. Retrying with recommended fee: {d8(current_fee)}")
+
+            publication["fee"] = d8(current_fee)
+            _write_text_file(args.out_payload, json.dumps(publication, indent=2))
+            unsigned_tx = build_arbitrary_from_path(
+                ctx,
+                session,
+                service="APP",
+                name=name,
+                identifier=identifier or None,
+                local_path=source_resolved,
+                title=title or None,
+                description=description or None,
+                tags=tags or None,
+                category=category or None,
+                fee_atomic=qort_to_atomic(current_fee),
+                preview=bool(args.preview),
+            )
+            _write_text_file(args.out_unsigned, unsigned_tx)
+            signed_tx = sign_tx(ctx, unsigned_tx, session)
+            _write_text_file(args.out_signed, signed_tx)
+
+    print("Transaction submitted.")
+    signature = _extract_signature(result)
+    if signature:
+        print("Signature: " + signature)
+    print("Node response:")
+    print(json.dumps(result, indent=2) if isinstance(result, (dict, list)) else str(result))
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     ctx = _build_context(args)
@@ -349,6 +557,9 @@ def run(argv: list[str] | None = None) -> int:
     _require_wallet_values(ctx, require_private=not bool(args.build_only))
 
     with make_session(ctx, include_api_key=True) as session:
+        if args.command == "app-publish":
+            return _run_app_publish(args, ctx, session)
+
         path, payload = _build_payload_and_path(ctx, args, session)
         _write_text_file(args.out_payload, json.dumps(payload, indent=2))
 

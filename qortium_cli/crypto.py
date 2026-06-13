@@ -86,23 +86,31 @@ def to_base58_pubkey(pub_from_config: str) -> str:
     raise ValueError("PUBLIC_KEY is neither Base58 nor decodable Base64")
 
 
-def derive_private_key_from_seed_phrase(seed_phrase: str) -> str:
+def qortal_hub_kdf(value: str) -> bytes:
     import bcrypt
 
-    phrase = (seed_phrase or "").strip()
-    if not phrase:
-        raise ValueError("Seed phrase is empty.")
+    text = str(value or "")
+    if not text:
+        raise ValueError("KDF input is empty.")
 
     parts = []
     for i in range(KDF_THREADS):
-        msg = (STATIC_SALT + phrase + str(i)).encode("utf-8")
+        msg = (STATIC_SALT + text + str(i)).encode("utf-8")
         sha = hashlib.sha512(msg).digest()
         b64_72 = base64.b64encode(sha).decode("ascii")[:72]
         pw = (b64_72.encode("utf-8") + b"\x00")[:72]
         parts.append(bcrypt.hashpw(pw, STATIC_BCRYPT_SALT).decode("utf-8"))
 
     final_input = (STATIC_SALT + "".join(parts)).encode("utf-8")
-    master_seed = hashlib.sha512(final_input).digest()
+    return hashlib.sha512(final_input).digest()
+
+
+def derive_private_key_from_seed_phrase(seed_phrase: str) -> str:
+    phrase = (seed_phrase or "").strip()
+    if not phrase:
+        raise ValueError("Seed phrase is empty.")
+
+    master_seed = qortal_hub_kdf(phrase)
 
     idx = (0).to_bytes(4, "big")
     inp = idx + master_seed + idx

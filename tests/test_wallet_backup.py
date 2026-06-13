@@ -1,0 +1,207 @@
+import hashlib
+import hmac
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import TestCase
+from unittest.mock import patch
+
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from qortium_cli.crypto import b58decode, b58encode, qortal_hub_kdf
+from qortium_cli.models import AccountSettings, AppContext, ChatSettings, EndpointSettings
+from qortium_cli.tools import export_wallet_backup
+from qortium_cli.wallet_backup import (
+    QORTIUM_PRIVATE_KEY_WALLET_VERSION,
+    decode_private_key_input,
+    default_wallet_backup_path,
+    generate_wallet_backup_from_private_key,
+    qortal_address_from_private_seed,
+    write_wallet_backup,
+)
+
+
+def make_context(private_key: str, address: str) -> AppContext:
+    return AppContext(
+        settings_dir=Path("."),
+        endpoint=EndpointSettings(base_url="http://127.0.0.1:24891", timeout_seconds=15),
+        account=AccountSettings(
+            name="tester",
+            account_address=address,
+            public_key="public-key",
+            private_key=private_key,
+            api_key="api-key",
+        ),
+        chat=ChatSettings(),
+        debug=False,
+    )
+
+
+class WalletBackupTests(TestCase):
+    def test_qortium_home_crypto_matches_javascript_vector(self) -> None:
+        payload = bytes(range(32))
+        iv = bytes(range(16))
+        key = qortal_hub_kdf("qortium-test-password")
+        encryptor = Cipher(
+            algorithms.AES(key[:32]),
+            modes.CBC(iv),
+        ).encryptor()
+        encrypted_seed = encryptor.update(payload) + encryptor.finalize()
+        mac = hmac.new(key[32:63], encrypted_seed, hashlib.sha512).digest()
+
+        self.assertEqual(
+            key.hex(),
+            "6ede17d8e313db973d06d05d1460a1e31e1ec99d04f608e3796c8ca7b2f4f17"
+            "2f9037b8ebda45b3b4ab391fea354687d317dbec91a9597b3f5c5979cb310176d",
+        )
+        self.assertEqual(
+            encrypted_seed.hex(),
+            "e620b0d027ba85168652eff7072c04c930c43567376fb62cdd5c918f8f046282",
+        )
+        self.assertEqual(
+            mac.hex(),
+            "de81ba8a7153235a327c36d2848a4b49000d0815ce6fbf877a9094e575ac7983"
+            "35b3532f583ffdbbddb8e03c424c7c0f5249484fa1ecac108b2d728a7237e42e",
+        )
+
+    def test_qortium_home_backup_decrypts_to_original_private_seed(self) -> None:
+        seed = bytes(range(32))
+        private_key = b58encode(seed)
+        address = qortal_address_from_private_seed(seed)
+        key = bytes(range(64))
+        salt = bytes(range(32, 64))
+        iv = bytes(range(16))
+
+        with patch("qortium_cli.wallet_backup.qortal_hub_kdf", return_value=key):
+            backup = generate_wallet_backup_from_private_key(
+                private_key,
+                address,
+                "backup-password",
+                salt=salt,
+                iv=iv,
+            )
+
+        encrypted_seed = b58decode(backup["encryptedSeed"])
+        decryptor = Cipher(
+            algorithms.AES(key[:32]),
+            modes.CBC(iv),
+        ).decryptor()
+        decrypted_seed = decryptor.update(encrypted_seed) + decryptor.finalize()
+        expected_mac = hmac.new(key[32:63], encrypted_seed, hashlib.sha512).digest()
+
+        self.assertEqual(decrypted_seed, seed)
+        self.assertEqual(b58decode(backup["mac"]), expected_mac)
+        self.assertEqual(backup["address0"], address)
+        self.assertEqual(
+            backup["version"],
+            QORTIUM_PRIVATE_KEY_WALLET_VERSION,
+        )
+        self.assertEqual(backup["kdfThreads"], 16)
+
+    def test_qortium_home_64_byte_secret_key_uses_first_32_bytes(self) -> None:
+        seed = bytes(range(32))
+        secret_key = seed + bytes(reversed(range(32)))
+
+        self.assertEqual(decode_private_key_input(b58encode(secret_key)), seed)
+
+    def test_backup_rejects_private_key_for_another_address(self) -> None:
+        private_key = b58encode(bytes(range(32)))
+        other_address = qortal_address_from_private_seed(bytes(range(1, 33)))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not match the configured wallet address",
+        ):
+            generate_wallet_backup_from_private_key(
+                private_key,
+                other_address,
+                "backup-password",
+            )
+
+    def test_write_wallet_backup_writes_json(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "qortium_backup_test.json"
+            backup = {"address0": "Qtest", "version": 1}
+
+            saved_path = write_wallet_backup(path, backup)
+
+            self.assertEqual(saved_path, path.resolve())
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), backup)
+            self.assertTrue(path.read_text(encoding="utf-8").endswith("\n"))
+
+    def test_default_backup_name_matches_qortium_home(self) -> None:
+        address = "Qtest"
+
+        self.assertEqual(
+            default_wallet_backup_path(address, wallet_name="My Wallet").name,
+            "My Wallet_Qtest.json",
+        )
+
+    def test_export_password_mismatch_does_not_write(self) -> None:
+        seed = bytes(range(32))
+        ctx = make_context(b58encode(seed), qortal_address_from_private_seed(seed))
+
+        with (
+            patch(
+                "qortium_cli.tools.prompt_secret",
+                side_effect=[
+                    "first-password",
+                    "different-password",
+                ],
+            ),
+            patch("qortium_cli.tools.prompt_str", return_value="tester"),
+            patch(
+                "qortium_cli.tools.generate_wallet_backup_from_private_key"
+            ) as generate_backup,
+            patch("qortium_cli.tools.write_wallet_backup") as write_backup,
+        ):
+            export_wallet_backup(ctx)
+
+        generate_backup.assert_not_called()
+        write_backup.assert_not_called()
+
+    def test_export_backup_uses_configured_private_key(self) -> None:
+        seed = bytes(range(32))
+        private_key = b58encode(seed)
+        address = qortal_address_from_private_seed(seed)
+        ctx = make_context(private_key, address)
+        output_path = Path("qortium_backup_test.json")
+        backup = {
+            "address0": address,
+            "version": QORTIUM_PRIVATE_KEY_WALLET_VERSION,
+        }
+
+        with (
+            patch(
+                "qortium_cli.tools.prompt_secret",
+                side_effect=[
+                    "backup-password",
+                    "backup-password",
+                ],
+            ),
+            patch(
+                "qortium_cli.tools.prompt_str",
+                side_effect=["My Wallet", str(output_path)],
+            ),
+            patch(
+                "qortium_cli.tools.default_wallet_backup_path",
+                return_value=output_path,
+            ) as default_path,
+            patch(
+                "qortium_cli.tools.generate_wallet_backup_from_private_key",
+                return_value=backup,
+            ) as generate_backup,
+            patch(
+                "qortium_cli.tools.write_wallet_backup",
+                return_value=output_path,
+            ) as write_backup,
+        ):
+            export_wallet_backup(ctx)
+
+        default_path.assert_called_once_with(address, wallet_name="My Wallet")
+        generate_backup.assert_called_once_with(
+            private_key,
+            address,
+            "backup-password",
+        )
+        write_backup.assert_called_once_with(output_path, backup)

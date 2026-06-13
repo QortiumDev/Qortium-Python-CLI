@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path, PurePosixPath
+import shutil
+import stat
+import tempfile
 from typing import Any, Dict, List
+from urllib.parse import quote
+import zipfile
 
 import requests
 
@@ -336,6 +342,357 @@ def get_asset_info(
     return {}
 
 
+def get_group_info(
+    ctx: AppContext,
+    group_id: int,
+    session: requests.Session,
+) -> Dict[str, Any]:
+    response = session.get(
+        build_api_url(ctx, f"/groups/{int(group_id)}"),
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def get_group_invites(
+    ctx: AppContext,
+    address: str,
+    session: requests.Session,
+) -> List[Dict[str, Any]]:
+    response = session.get(
+        build_api_url(ctx, f"/groups/invites/{address}"),
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    return []
+
+
+def _flatten_admin_join_request_groups(rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+
+    requests: List[Dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        group = row.get("group")
+        join_requests = row.get("joinRequests")
+        if not isinstance(group, dict) or not isinstance(join_requests, list):
+            continue
+
+        try:
+            group_id = int(group.get("groupId", 0))
+        except (TypeError, ValueError):
+            continue
+        if group_id <= 0:
+            continue
+
+        group_name = str(group.get("groupName", "") or "").strip()
+        for join_request in join_requests:
+            if not isinstance(join_request, dict):
+                continue
+            joiner = str(join_request.get("joiner", "") or "").strip()
+            if not joiner:
+                continue
+
+            key = (group_id, joiner)
+            if key in seen:
+                continue
+            seen.add(key)
+            requests.append(
+                {
+                    "groupId": group_id,
+                    "groupName": group_name,
+                    "joiner": joiner,
+                }
+            )
+
+    return requests
+
+
+def _get_group_admin_addresses(
+    ctx: AppContext,
+    group_id: int,
+    session: requests.Session,
+) -> set[str]:
+    response = session.get(
+        build_api_url(ctx, f"/groups/members/{int(group_id)}"),
+        params={"onlyAdmins": "true", "limit": 0},
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        return set()
+
+    members = data.get("groupMembers")
+    if not isinstance(members, list):
+        members = data.get("members")
+    if not isinstance(members, list):
+        return set()
+
+    return {
+        str(member.get("member", "") or "").strip()
+        for member in members
+        if isinstance(member, dict) and str(member.get("member", "") or "").strip()
+    }
+
+
+def _get_group_join_requests(
+    ctx: AppContext,
+    group_id: int,
+    session: requests.Session,
+) -> List[Dict[str, Any]]:
+    response = session.get(
+        build_api_url(ctx, f"/groups/joinrequests/{int(group_id)}"),
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    return []
+
+
+def get_admin_group_join_requests(
+    ctx: AppContext,
+    address: str,
+    session: requests.Session,
+) -> List[Dict[str, Any]]:
+    safe_address = quote(address, safe="")
+    response = session.get(
+        build_api_url(ctx, f"/groups/joinrequests/admin/{safe_address}"),
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    if response.status_code != 404:
+        response.raise_for_status()
+        return _flatten_admin_join_request_groups(response.json())
+
+    # Compatibility path for nodes without the aggregate admin endpoint.
+    groups_response = session.get(
+        build_api_url(ctx, f"/groups/member/{safe_address}"),
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    groups_response.raise_for_status()
+    groups = groups_response.json()
+    if not isinstance(groups, list):
+        return []
+
+    null_owner = "QdSnUy6sUiEnaN87dWmE92g1uQjrvPgrWG"
+    requests: List[Dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        try:
+            group_id = int(group.get("groupId", 0))
+        except (TypeError, ValueError):
+            continue
+        if group_id <= 0:
+            continue
+
+        admins = _get_group_admin_addresses(ctx, group_id, session)
+        owner = str(group.get("owner", "") or "").strip()
+        can_approve = address in admins
+        if owner == null_owner and not admins:
+            can_approve = True
+        if not can_approve:
+            continue
+
+        group_name = str(group.get("groupName", "") or "").strip()
+        for join_request in _get_group_join_requests(ctx, group_id, session):
+            joiner = str(join_request.get("joiner", "") or "").strip()
+            if not joiner:
+                continue
+            key = (group_id, joiner)
+            if key in seen:
+                continue
+            seen.add(key)
+            requests.append(
+                {
+                    "groupId": group_id,
+                    "groupName": group_name,
+                    "joiner": joiner,
+                }
+            )
+
+    return requests
+
+
+def get_name_info(
+    ctx: AppContext,
+    name: str,
+    session: requests.Session,
+) -> Dict[str, Any]:
+    response = session.get(
+        build_api_url(ctx, f"/names/{quote(name, safe='')}"),
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def get_account_names(
+    ctx: AppContext,
+    address: str,
+    session: requests.Session,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[str]:
+    response = session.get(
+        build_api_url(ctx, f"/names/address/{quote(address, safe='')}"),
+        params={
+            "limit": max(1, int(limit)),
+            "offset": max(0, int(offset)),
+            "reverse": "false",
+        },
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, list):
+        return []
+
+    names: List[str] = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def search_arbitrary_resources(
+    ctx: AppContext,
+    session: requests.Session,
+    *,
+    query: str = "",
+    service: str = "",
+    names: List[str] | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "mode": "LATEST",
+        "includestatus": "true",
+        "includemetadata": "true",
+        "excludeblocked": "false",
+        "limit": max(1, int(limit)),
+        "offset": max(0, int(offset)),
+        "reverse": "true",
+    }
+    if query:
+        params["query"] = query
+    if service:
+        params["service"] = service
+    if names:
+        params["name"] = names
+        params["exactmatchnames"] = "true"
+
+    response = session.get(
+        build_api_url(ctx, "/arbitrary/resources/search"),
+        params=params,
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    return []
+
+
+def get_hosted_arbitrary_resources(
+    ctx: AppContext,
+    session: requests.Session,
+    *,
+    query: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "limit": max(1, int(limit)),
+        "offset": max(0, int(offset)),
+    }
+    if query:
+        params["query"] = query
+
+    response = session.get(
+        build_api_url(ctx, "/arbitrary/hosted/resources"),
+        params=params,
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    return []
+
+
+def build_arbitrary_delete(
+    ctx: AppContext,
+    service: str,
+    name: str,
+    identifier: str | None,
+    fee_atomic: int,
+    session: requests.Session,
+) -> str:
+    service_path = quote(service, safe="")
+    name_path = quote(name, safe="")
+    if identifier is None:
+        path = f"/arbitrary/resource/{service_path}/{name_path}/delete"
+    else:
+        identifier_path = quote(identifier, safe="")
+        path = f"/arbitrary/resource/{service_path}/{name_path}/{identifier_path}/delete"
+
+    response = session.post(
+        build_api_url(ctx, path),
+        params={"fee": max(0, int(fee_atomic))},
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    return (response.text or "").strip().strip('"')
+
+
+def delete_local_arbitrary_resource(
+    ctx: AppContext,
+    service: str,
+    name: str,
+    identifier: str,
+    session: requests.Session,
+) -> bool:
+    path = (
+        f"/arbitrary/resource/{quote(service, safe='')}/"
+        f"{quote(name, safe='')}/{quote(identifier, safe='')}"
+    )
+    response = session.delete(
+        build_api_url(ctx, path),
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+
+    try:
+        body = response.json()
+        if isinstance(body, bool):
+            return body
+    except Exception:
+        pass
+    return (response.text or "").strip().lower() == "true"
+
+
 def build_chat(ctx: AppContext, payload: Dict[str, Any], session: requests.Session) -> str:
     response = session.post(
         build_api_url(ctx, "/chat"),
@@ -395,6 +752,168 @@ def build_raw_transaction(
         if isinstance(body, str):
             return body.strip()
     return (response.text or "").strip().strip('"')
+
+
+def _extract_zip_safely(archive: zipfile.ZipFile, target_dir: Path) -> None:
+    root = target_dir.resolve()
+
+    for member in archive.infolist():
+        member_name = member.filename.replace("\\", "/")
+        member_path = PurePosixPath(member_name)
+        parts = member_path.parts
+        if (
+            not parts
+            or member_path.is_absolute()
+            or ".." in parts
+            or (len(parts[0]) >= 2 and parts[0][1] == ":")
+        ):
+            raise RuntimeError(f"Unsafe path in APP zip: {member.filename}")
+
+        unix_mode = member.external_attr >> 16
+        file_type = unix_mode & 0o170000
+        if file_type == stat.S_IFLNK:
+            raise RuntimeError(f"Symbolic links are not allowed in APP zip: {member.filename}")
+        if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+            raise RuntimeError(f"Unsupported entry in APP zip: {member.filename}")
+
+        output_path = target_dir.joinpath(*parts).resolve()
+        if output_path != root and root not in output_path.parents:
+            raise RuntimeError(f"Unsafe path in APP zip: {member.filename}")
+
+        if member.is_dir():
+            output_path.mkdir(parents=True, exist_ok=True)
+            continue
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member) as source, output_path.open("wb") as destination:
+            shutil.copyfileobj(source, destination)
+
+
+def _validate_arbitrary_metadata(
+    title: str | None,
+    description: str | None,
+    tags: list[str] | None,
+) -> list[str]:
+    if title and len(title.encode("utf-8")) > 80:
+        raise RuntimeError("QDN title exceeds 80 UTF-8 bytes.")
+    if description and len(description.encode("utf-8")) > 240:
+        raise RuntimeError("QDN description exceeds 240 UTF-8 bytes.")
+
+    cleaned_tags = [str(tag).strip() for tag in tags or [] if str(tag).strip()]
+    if len(cleaned_tags) > 5:
+        raise RuntimeError("QDN supports at most 5 tags.")
+    for tag in cleaned_tags:
+        if len(tag) > 20:
+            raise RuntimeError(f"QDN tag exceeds 20 characters: {tag}")
+    return cleaned_tags
+
+
+def build_arbitrary_from_path(
+    ctx: AppContext,
+    session: requests.Session,
+    *,
+    service: str,
+    name: str,
+    local_path: str,
+    identifier: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    category: str | None = None,
+    fee_atomic: int | None = None,
+    preview: bool = False,
+) -> str:
+    normalized_service = str(service).strip().upper()
+    normalized_name = str(name).strip()
+    if not normalized_service:
+        raise RuntimeError("QDN service cannot be empty.")
+    if not normalized_name:
+        raise RuntimeError("Registered name cannot be empty.")
+
+    cleaned_title = str(title or "").strip()
+    cleaned_description = str(description or "").strip()
+    cleaned_tags = _validate_arbitrary_metadata(
+        cleaned_title or None,
+        cleaned_description or None,
+        tags,
+    )
+
+    safe_service = quote(normalized_service, safe="")
+    safe_name = quote(normalized_name, safe="")
+    identifier_value = str(identifier or "").strip()
+    if identifier_value:
+        path = f"/arbitrary/{safe_service}/{safe_name}/{quote(identifier_value, safe='')}"
+    else:
+        path = f"/arbitrary/{safe_service}/{safe_name}"
+
+    params: Dict[str, Any] = {}
+    if cleaned_title:
+        params["title"] = cleaned_title
+    if cleaned_description:
+        params["description"] = cleaned_description
+    if cleaned_tags:
+        params["tags"] = cleaned_tags
+    if category:
+        params["category"] = str(category).strip().upper()
+    if fee_atomic is not None:
+        params["fee"] = max(0, int(fee_atomic))
+    if preview:
+        params["preview"] = "true"
+
+    source_path = Path(str(local_path)).expanduser()
+    if not source_path.exists():
+        raise RuntimeError(f"Local path does not exist: {source_path}")
+
+    publish_path = source_path.resolve()
+    temp_dir = None
+    if normalized_service == "APP":
+        if source_path.is_file():
+            if source_path.suffix.lower() != ".zip":
+                raise RuntimeError("APP publish path must be a folder or .zip file.")
+
+            temp_dir = tempfile.TemporaryDirectory(prefix="qortium_cli_app_")
+            extract_root = Path(temp_dir.name)
+            try:
+                with zipfile.ZipFile(source_path) as archive:
+                    _extract_zip_safely(archive, extract_root)
+            except zipfile.BadZipFile as exc:
+                temp_dir.cleanup()
+                temp_dir = None
+                raise RuntimeError(f"Invalid zip file for APP publish: {source_path}") from exc
+            except Exception:
+                temp_dir.cleanup()
+                temp_dir = None
+                raise
+
+            children = [child for child in extract_root.iterdir() if child.name != "__MACOSX"]
+            publish_path = extract_root
+            if len(children) == 1 and children[0].is_dir():
+                publish_path = children[0]
+        elif not source_path.is_dir():
+            raise RuntimeError("APP publish path must be a folder or .zip file.")
+
+        if not (publish_path / "index.html").is_file():
+            if temp_dir is not None:
+                temp_dir.cleanup()
+                temp_dir = None
+            raise RuntimeError(
+                "APP publishing requires index.html at the app root "
+                "(or inside a single top-level zip folder)."
+            )
+
+    try:
+        response = session.post(
+            build_api_url(ctx, path),
+            params=params,
+            data=str(publish_path),
+            headers={"Content-Type": "text/plain"},
+            timeout=ctx.endpoint.timeout_seconds,
+        )
+        response.raise_for_status()
+        return (response.text or "").strip().strip('"')
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
 
 
 def get_recommended_fee(ctx: AppContext, unsigned_tx: str, session: requests.Session) -> Decimal:
