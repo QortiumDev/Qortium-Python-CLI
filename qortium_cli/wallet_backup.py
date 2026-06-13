@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Dict
 
@@ -81,6 +82,29 @@ def _require_wallet_version(wallet: Dict[str, Any]) -> int:
     return version
 
 
+def _strip_wrapping_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def normalize_wallet_file_path(path: str | Path) -> Path:
+    raw_path = str(path or "").strip()
+    if os.name != "nt":
+        try:
+            parts = shlex.split(raw_path)
+        except ValueError:
+            parts = []
+        if len(parts) == 1:
+            raw_path = parts[0]
+        else:
+            raw_path = _strip_wrapping_quotes(raw_path)
+    else:
+        raw_path = _strip_wrapping_quotes(raw_path)
+
+    return Path(raw_path).expanduser().resolve()
+
+
 def decrypt_wallet_payload(wallet: Dict[str, Any], password: str) -> bytes:
     wallet_password = str(password or "")
     if not wallet_password:
@@ -146,8 +170,8 @@ def private_key_from_wallet(wallet: Dict[str, Any], password: str) -> str:
     return b58encode(private_seed)
 
 
-def private_key_from_wallet_file(path: Path, password: str) -> str:
-    wallet_path = path.expanduser().resolve()
+def private_key_from_wallet_file(path: str | Path, password: str) -> str:
+    wallet_path = normalize_wallet_file_path(path)
     try:
         wallet = json.loads(wallet_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:

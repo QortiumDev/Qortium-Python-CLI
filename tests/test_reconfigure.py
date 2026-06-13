@@ -122,7 +122,7 @@ class ReconfigureTests(TestCase):
 
             with (
                 patch("qortium_cli.setup_wizard.read_menu_choice", return_value="3"),
-                patch("qortium_cli.setup_wizard.prompt_str", return_value=str(wallet_path)),
+                patch("qortium_cli.setup_wizard.prompt_str", return_value=f"'{wallet_path}' "),
                 patch("qortium_cli.setup_wizard.prompt_secret", return_value="wallet-password"),
                 patch(
                     "qortium_cli.setup_wizard.private_key_from_wallet_file",
@@ -138,7 +138,7 @@ class ReconfigureTests(TestCase):
 
             saved = load_account_settings(settings_dir)
 
-            private_key_from_wallet_file.assert_called_once_with(wallet_path, "wallet-password")
+            private_key_from_wallet_file.assert_called_once_with(wallet_path.resolve(), "wallet-password")
             account_from_private_key.assert_called_once_with(ctx, "wallet-private-key", "old-api-key")
             self.assertEqual(ctx.account.private_key, "wallet-private-key")
             self.assertEqual(saved.private_key, "wallet-private-key")

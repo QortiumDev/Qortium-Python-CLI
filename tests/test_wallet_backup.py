@@ -18,6 +18,7 @@ from qortium_cli.wallet_backup import (
     derive_address_seed,
     default_wallet_backup_path,
     generate_wallet_backup_from_private_key,
+    normalize_wallet_file_path,
     private_key_from_wallet,
     qortal_address_from_private_seed,
     write_wallet_backup,
@@ -127,6 +128,19 @@ class WalletBackupTests(TestCase):
         secret_key = seed + bytes(reversed(range(32)))
 
         self.assertEqual(decode_private_key_input(b58encode(secret_key)), seed)
+
+    def test_normalize_wallet_file_path_accepts_dragged_terminal_paths(self) -> None:
+        quoted_path = "'/home/user/Downloads/qortium-docs/wallet.json' "
+        escaped_path = "/home/user/Downloads/qortium-docs/My\\ Wallet.json"
+
+        self.assertEqual(
+            normalize_wallet_file_path(quoted_path),
+            Path("/home/user/Downloads/qortium-docs/wallet.json"),
+        )
+        self.assertEqual(
+            normalize_wallet_file_path(escaped_path),
+            Path("/home/user/Downloads/qortium-docs/My Wallet.json"),
+        )
 
     def test_private_key_from_version_3_wallet_file_payload(self) -> None:
         seed = bytes(range(32))
