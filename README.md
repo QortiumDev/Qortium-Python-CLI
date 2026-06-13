@@ -80,10 +80,12 @@ Optional custom location:
 
 - set `QORTIUM_CLI_HOME=/path/to/folder` before launch
 
-## 6) Reconfigure Or Reset
+## 6) Reconfigure Or Run Setup
 
-- Choose menu option `9` to change the endpoint URL, request timeout, API key,
-  or wallet key independently.
+- Choose main menu option `9` to change the endpoint URL, request timeout,
+  API key, or wallet key independently.
+- Inside reconfigure, choose option `9` (`Run initial setup`) to run the
+  initial setup flow again, then return to the main menu.
 - Endpoint URL changes run the same connection check and can be retried or kept
   anyway if the node is offline.
 - API key changes also look for a matching local Core `apikey.txt`; when one is

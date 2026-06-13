@@ -9,6 +9,7 @@ from qortium_cli.setup_wizard import (
     configure_api_key,
     configure_endpoint_url,
     configure_wallet_identity,
+    run_initial_setup,
     run_reconfigure_menu,
 )
 from qortium_cli.storage import (
@@ -85,6 +86,55 @@ class ReconfigureTests(TestCase):
             self.assertEqual(saved.api_key, "detected-api-key")
             self.assertEqual(saved.private_key, "old-private-key")
 
+    def test_initial_setup_prefers_detected_api_key_over_existing_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings_dir = Path(tmp)
+            ctx = make_context(settings_dir)
+            detected = LocalCoreApiKey(
+                api_key="detected-api-key",
+                api_key_path=settings_dir / "apikey.txt",
+                api_key_directory=settings_dir,
+                cwd=settings_dir,
+                jar_path=settings_dir / "qortium.jar",
+                pid=123,
+                settings_path=settings_dir / "settings.json",
+            )
+            next_account = AccountSettings(
+                name="detected-account",
+                account_address="Qdetected",
+                public_key="detected-public-key",
+                private_key="detected-private-key",
+                api_key="detected-api-key",
+            )
+
+            with (
+                patch(
+                    "qortium_cli.setup_wizard._prompt_endpoint_url_with_connection_check",
+                    return_value="http://127.0.0.1:24891",
+                ),
+                patch("qortium_cli.setup_wizard.prompt_int", return_value=15),
+                patch("qortium_cli.setup_wizard.detect_local_core_api_key", return_value=detected),
+                patch("qortium_cli.setup_wizard.prompt_secret", return_value=""),
+                patch("qortium_cli.setup_wizard._prompt_private_key", return_value="detected-private-key"),
+                patch(
+                    "qortium_cli.setup_wizard._account_from_private_key",
+                    return_value=next_account,
+                ) as account_from_private_key,
+                patch("qortium_cli.setup_wizard.print_setup_banner"),
+                patch("qortium_cli.setup_wizard.pause"),
+                patch("qortium_cli.setup_wizard.ok"),
+            ):
+                run_initial_setup(ctx)
+
+            saved = load_account_settings(settings_dir)
+
+            account_from_private_key.assert_called_once_with(
+                ctx,
+                "detected-private-key",
+                "detected-api-key",
+            )
+            self.assertEqual(saved.api_key, "detected-api-key")
+
     def test_reconfigure_menu_can_update_only_api_key(self) -> None:
         with TemporaryDirectory() as tmp:
             settings_dir = Path(tmp)
@@ -106,6 +156,24 @@ class ReconfigureTests(TestCase):
 
             self.assertEqual(saved.api_key, "new-api-key")
             self.assertEqual(saved.private_key, "old-private-key")
+
+    def test_reconfigure_menu_runs_initial_setup_then_returns(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings_dir = Path(tmp)
+            ctx = make_context(settings_dir)
+
+            with (
+                patch("qortium_cli.setup_wizard.read_menu_choice", return_value="9") as read_menu_choice,
+                patch("qortium_cli.setup_wizard.run_initial_setup") as run_initial_setup,
+                patch("qortium_cli.setup_wizard.print_setup_banner"),
+                patch("qortium_cli.setup_wizard.print_stat"),
+                patch("qortium_cli.setup_wizard.print_option") as print_option,
+            ):
+                run_reconfigure_menu(ctx)
+
+            print_option.assert_any_call("9", "Run initial setup")
+            read_menu_choice.assert_called_once()
+            run_initial_setup.assert_called_once_with(ctx)
 
     def test_configure_wallet_identity_accepts_wallet_file(self) -> None:
         with TemporaryDirectory() as tmp:

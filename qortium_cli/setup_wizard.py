@@ -155,17 +155,17 @@ def _detect_local_core_api_key(ctx: AppContext):
 
 
 def _prompt_required_api_key(ctx: AppContext, existing_api_key: str = "") -> str:
-    has_existing_api_key = bool(existing_api_key) and (not is_placeholder(existing_api_key))
-    if has_existing_api_key:
-        api_key = prompt_secret("API key (X-API-KEY) (press Enter to keep current): ").strip()
-        return api_key or existing_api_key
-
     suggestion = _detect_local_core_api_key(ctx)
     if suggestion:
         api_key = prompt_secret(
             "API key (X-API-KEY) [detected local Core key] (press Enter to use): "
         ).strip()
         return api_key or suggestion.api_key
+
+    has_existing_api_key = bool(existing_api_key) and (not is_placeholder(existing_api_key))
+    if has_existing_api_key:
+        api_key = prompt_secret("API key (X-API-KEY) (press Enter to keep current): ").strip()
+        return api_key or existing_api_key
 
     return prompt_secret("API key (X-API-KEY): ").strip()
 
@@ -244,62 +244,7 @@ def configure_wallet_identity(ctx: AppContext) -> None:
     print(C_TEXT + f"Account: {ctx.account.account_address}" + RESET)
 
 
-def run_reconfigure_menu(ctx: AppContext) -> None:
-    while True:
-        print_setup_banner("Reconfigure")
-        print_stat("Endpoint", ctx.endpoint.base_url)
-        print_stat("Timeout", f"{ctx.endpoint.timeout_seconds} seconds")
-        print_stat("Account", ctx.account.account_address)
-        print_stat(
-            "API Key",
-            "Configured" if not is_placeholder(ctx.account.api_key) else "Missing",
-        )
-        print()
-        print_option("1", "Change endpoint URL")
-        print_option("2", "Change request timeout")
-        print_option("3", "Change API key")
-        print_option("4", "Change wallet / account")
-        print_option("0", "Back")
-        choice = read_menu_choice("Choose an option: ")
-
-        if choice == "0":
-            return
-
-        try:
-            if choice == "1":
-                configure_endpoint_url(ctx)
-                pause()
-                continue
-            if choice == "2":
-                configure_timeout(ctx)
-                pause()
-                continue
-            if choice == "3":
-                configure_api_key(ctx)
-                pause()
-                continue
-            if choice == "4":
-                configure_wallet_identity(ctx)
-                pause()
-                continue
-        except Exception as exc:
-            error("Reconfiguration failed:")
-            print(str(exc))
-            pause()
-            continue
-
-        warn("Unknown option.")
-        pause()
-
-
-def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
-    if force:
-        run_reconfigure_menu(ctx)
-        return
-
-    if current_endpoint_values_ready(ctx) and current_config_values_ready(ctx):
-        return
-
+def run_initial_setup(ctx: AppContext) -> None:
     print_setup_banner("First Run Setup")
     print(C_TEXT + "Let's create endpoint.py and config.py in:" + RESET)
     print(C_TEXT + f"  {ctx.settings_dir}" + RESET)
@@ -337,3 +282,66 @@ def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
     ok("Setup complete. endpoint.py and config.py have been created.")
     print(C_TEXT + f"Settings directory: {ctx.settings_dir}" + RESET)
     pause()
+
+
+def run_reconfigure_menu(ctx: AppContext) -> None:
+    while True:
+        print_setup_banner("Reconfigure")
+        print_stat("Endpoint", ctx.endpoint.base_url)
+        print_stat("Timeout", f"{ctx.endpoint.timeout_seconds} seconds")
+        print_stat("Account", ctx.account.account_address)
+        print_stat(
+            "API Key",
+            "Configured" if not is_placeholder(ctx.account.api_key) else "Missing",
+        )
+        print()
+        print_option("1", "Change endpoint URL")
+        print_option("2", "Change request timeout")
+        print_option("3", "Change API key")
+        print_option("4", "Change wallet / account")
+        print_option("9", "Run initial setup")
+        print_option("0", "Back")
+        choice = read_menu_choice("Choose an option: ")
+
+        if choice == "0":
+            return
+
+        try:
+            if choice == "1":
+                configure_endpoint_url(ctx)
+                pause()
+                continue
+            if choice == "2":
+                configure_timeout(ctx)
+                pause()
+                continue
+            if choice == "3":
+                configure_api_key(ctx)
+                pause()
+                continue
+            if choice == "4":
+                configure_wallet_identity(ctx)
+                pause()
+                continue
+            if choice == "9":
+                run_initial_setup(ctx)
+                return
+        except Exception as exc:
+            error("Reconfiguration failed:")
+            print(str(exc))
+            pause()
+            continue
+
+        warn("Unknown option.")
+        pause()
+
+
+def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
+    if force:
+        run_reconfigure_menu(ctx)
+        return
+
+    if current_endpoint_values_ready(ctx) and current_config_values_ready(ctx):
+        return
+
+    run_initial_setup(ctx)
