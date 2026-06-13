@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import base64
 import datetime
 import hashlib
-import json
 import traceback
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -11,8 +9,9 @@ from typing import Any, Dict, List
 
 import requests
 
+from qortium_cli.chat_format import MessageThread, build_message_threads, decode_chat_message
 from qortium_cli.constants import BOLD, CHAT_USER_COLORS, C_TEXT, QDN_SERVICES, RESET
-from qortium_cli.crypto import b58decode, b58encode, is_base58, to_base58_pubkey
+from qortium_cli.crypto import b58encode, to_base58_pubkey
 from qortium_cli.models import AppContext, ToolPlugin
 from qortium_cli.services import (
     build_arbitrary_delete,
@@ -172,63 +171,67 @@ def _format_invite_expiry(expiry_ms: Any) -> str:
     return _format_chat_timestamp(expiry)
 
 
-def _extract_doc_text(node: Any) -> str:
-    if isinstance(node, dict):
-        node_type = str(node.get("type", ""))
-        if node_type == "text":
-            return str(node.get("text", ""))
-
-        parts = []
-        for child in node.get("content", []):
-            parts.append(_extract_doc_text(child))
-
-        if node_type == "paragraph":
-            return "".join(parts) + "\n"
-        return "".join(parts)
-
-    if isinstance(node, list):
-        return "".join(_extract_doc_text(child) for child in node)
-
-    return ""
+def _chat_message_signature(message: Dict[str, Any] | MessageThread) -> str:
+    if isinstance(message, MessageThread):
+        message = dict(message.original)
+    return str(message.get("signature") or "").strip()
 
 
-def _decode_chat_data(data: Any, encoding: Any) -> str:
-    if not isinstance(data, str) or not data:
+def _chat_message_sender(message: Dict[str, Any]) -> str:
+    return str(message.get("sender") or "").strip()
+
+
+def _chat_sender_label(message: Dict[str, Any]) -> str:
+    sender_address = _chat_message_sender(message)
+    return str(message.get("senderName") or sender_address or "Unknown").strip()
+
+
+def _chat_identity_display(message: Dict[str, Any]) -> str:
+    sender_address = _chat_message_sender(message)
+    sender_label = _chat_sender_label(message)
+    return _colorize_chat_identity(sender_label, sender_address or sender_label)
+
+
+def _short_chat_signature(signature: str) -> str:
+    signature = signature.strip()
+    if len(signature) <= 16:
+        return signature
+    return f"{signature[:12]}..."
+
+
+def _chat_message_snippet(thread: MessageThread) -> str:
+    decoded = decode_chat_message(thread.latest)
+    for line in decoded.body.splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        if len(clean) > 96:
+            return clean[:93].rstrip() + "..."
+        return clean
+    return "[no text]"
+
+
+def _chat_reply_reference(thread: MessageThread, threads_by_signature: Dict[str, MessageThread]) -> str:
+    decoded = decode_chat_message(thread.latest)
+    if decoded.replied_to:
+        return decoded.replied_to
+
+    original_decoded = decode_chat_message(thread.original)
+    if original_decoded.replied_to:
+        return original_decoded.replied_to
+
+    reference = str(thread.original.get("chatReference") or "").strip()
+    if not reference:
         return ""
 
-    enc = str(encoding or "").upper()
-    decoded_bytes = None
+    referenced_thread = threads_by_signature.get(reference)
+    if not referenced_thread:
+        return ""
 
-    if enc == "BASE64":
-        try:
-            decoded_bytes = base64.b64decode(data)
-        except Exception:
-            return data
-    elif enc == "BASE58" or is_base58(data):
-        try:
-            decoded_bytes = b58decode(data)
-        except Exception:
-            return data
+    if _chat_message_sender(dict(referenced_thread.original)) == _chat_message_sender(dict(thread.original)):
+        return ""
 
-    if decoded_bytes is None:
-        return data
-
-    text = decoded_bytes.decode("utf-8", errors="replace")
-    stripped = text.strip()
-
-    if stripped.startswith("{") and stripped.endswith("}"):
-        try:
-            payload = json.loads(stripped)
-            if isinstance(payload, dict):
-                message_doc = payload.get("messageText")
-                if isinstance(message_doc, dict):
-                    doc_text = _extract_doc_text(message_doc).strip()
-                    if doc_text:
-                        return doc_text
-        except Exception:
-            pass
-
-    return text
+    return reference
 
 
 def _get_chat_fee_decimal(ctx: AppContext) -> Decimal:
@@ -599,29 +602,53 @@ def _print_chat_timeline(messages: List[Dict[str, Any]]) -> None:
         warn("No messages found for this group.")
         return
 
-    print_section(f"Chat Timeline ({len(messages)} messages)")
+    threads = build_message_threads(messages)
+    if not threads:
+        warn("No displayable chat messages found for this group.")
+        return
+
+    threads_by_signature = {
+        _chat_message_signature(thread): thread
+        for thread in threads
+        if _chat_message_signature(thread)
+    }
+
+    print_section(f"Chat Timeline ({len(threads)} messages)")
     print()
 
-    for message in messages:
-        timestamp = _format_chat_timestamp(message.get("timestamp"))
-        sender_address = str(message.get("sender") or "").strip()
-        sender_label = str(message.get("senderName") or sender_address or "Unknown").strip()
-        sender = _colorize_chat_identity(sender_label, sender_address or sender_label)
+    for thread in threads:
+        original = dict(thread.original)
+        latest = dict(thread.latest)
+        decoded = decode_chat_message(latest)
 
-        recipient = str(message.get("recipient") or "").strip()
+        timestamp = _format_chat_timestamp(original.get("timestamp"))
+        sender = _chat_identity_display(original)
+
+        recipient = str(original.get("recipient") or "").strip()
         recipient_label = _colorize_chat_identity(recipient, recipient) if recipient else ""
 
-        body = _decode_chat_data(message.get("data"), message.get("encoding"))
-        is_encrypted = bool(message.get("isEncrypted", False))
-        is_unconfirmed = bool(message.get("_unconfirmed", False))
+        is_encrypted = bool(latest.get("isEncrypted", False)) or decoded.kind == "encrypted"
+        is_unconfirmed = bool(latest.get("_unconfirmed", False) or original.get("_unconfirmed", False))
 
         target_label = f" -> {recipient_label}" if recipient else ""
         encryption_label = " [enc]" if is_encrypted else ""
+        edited_label = " [edited]" if thread.revisions else ""
         unconfirmed_label = " [mempool]" if is_unconfirmed else ""
-        print(f"[{timestamp}] {sender}{target_label}{encryption_label}{unconfirmed_label}")
+        print(
+            f"[{timestamp}] {sender}{target_label}"
+            f"{encryption_label}{edited_label}{unconfirmed_label}"
+        )
 
-        if body.strip():
-            for line in body.splitlines():
+        replied_to = _chat_reply_reference(thread, threads_by_signature)
+        referenced_thread = threads_by_signature.get(replied_to)
+        if referenced_thread:
+            reply_sender = _chat_sender_label(dict(referenced_thread.original))
+            print(f"  > reply to {reply_sender}: {_chat_message_snippet(referenced_thread)}")
+        elif replied_to:
+            print(f"  > reply to {_short_chat_signature(replied_to)}")
+
+        if decoded.body.strip():
+            for line in decoded.body.splitlines():
                 print(f"  {line}")
         else:
             print("  [no text payload]")
