@@ -4,8 +4,13 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from qortium_cli.models import AccountSettings, AppContext, ChatSettings, EndpointSettings
-from qortium_cli.setup_wizard import configure_api_key, run_reconfigure_menu
-from qortium_cli.storage import load_account_settings, write_config_file
+from qortium_cli.setup_wizard import configure_api_key, configure_endpoint_url, run_reconfigure_menu
+from qortium_cli.storage import (
+    load_account_settings,
+    load_endpoint_settings,
+    write_config_file,
+    write_endpoint_file,
+)
 
 
 def make_context(settings_dir: Path) -> AppContext:
@@ -63,3 +68,58 @@ class ReconfigureTests(TestCase):
 
             self.assertEqual(saved.api_key, "new-api-key")
             self.assertEqual(saved.private_key, "old-private-key")
+
+    def test_configure_endpoint_url_retries_after_failed_connection(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings_dir = Path(tmp)
+            ctx = make_context(settings_dir)
+            write_endpoint_file(settings_dir, ctx.endpoint)
+
+            with (
+                patch(
+                    "qortium_cli.setup_wizard.prompt_str",
+                    side_effect=["http://bad-node:24891", "http://good-node:24891"],
+                ),
+                patch(
+                    "qortium_cli.setup_wizard.check_node_connection",
+                    side_effect=[
+                        (False, "connection refused"),
+                        (True, "Node API responded."),
+                    ],
+                ) as check_node_connection,
+                patch("qortium_cli.setup_wizard.read_menu_choice", return_value="1"),
+                patch("qortium_cli.setup_wizard.print_option"),
+                patch("qortium_cli.setup_wizard.warn"),
+                patch("qortium_cli.setup_wizard.ok"),
+            ):
+                configure_endpoint_url(ctx)
+
+            saved = load_endpoint_settings(settings_dir)
+
+            self.assertEqual(ctx.endpoint.base_url, "http://good-node:24891")
+            self.assertEqual(saved.base_url, "http://good-node:24891")
+            self.assertEqual(check_node_connection.call_count, 2)
+
+    def test_configure_endpoint_url_can_continue_after_failed_connection(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings_dir = Path(tmp)
+            ctx = make_context(settings_dir)
+            write_endpoint_file(settings_dir, ctx.endpoint)
+
+            with (
+                patch("qortium_cli.setup_wizard.prompt_str", return_value="http://bad-node:24891"),
+                patch(
+                    "qortium_cli.setup_wizard.check_node_connection",
+                    return_value=(False, "connection refused"),
+                ) as check_node_connection,
+                patch("qortium_cli.setup_wizard.read_menu_choice", return_value="2"),
+                patch("qortium_cli.setup_wizard.print_option"),
+                patch("qortium_cli.setup_wizard.warn"),
+            ):
+                configure_endpoint_url(ctx)
+
+            saved = load_endpoint_settings(settings_dir)
+
+            self.assertEqual(ctx.endpoint.base_url, "http://bad-node:24891")
+            self.assertEqual(saved.base_url, "http://bad-node:24891")
+            check_node_connection.assert_called_once_with("http://bad-node:24891", 15)

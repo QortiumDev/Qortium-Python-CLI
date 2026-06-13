@@ -50,6 +50,10 @@ Then it auto-fills:
 - account address
 - display name (primary name if available)
 
+The endpoint URL is checked with `/admin/status` when selected. If the node is not
+connected or does not return node status, setup lets you enter a different endpoint
+or continue with the selected endpoint anyway.
+
 ## 5) Runtime Settings Files
 
 The app writes runtime settings here:
@@ -71,6 +75,8 @@ Optional custom location:
 
 - Choose menu option `9` to change the endpoint URL, request timeout, API key,
   or wallet key independently.
+- Endpoint URL changes run the same connection check and can be retried or kept
+  anyway if the node is offline.
 - Changing the API key does not ask for, replace, or re-derive your private key.
 - Delete the runtime settings files above to run first-time setup again.
 

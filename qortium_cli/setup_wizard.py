@@ -6,6 +6,7 @@ from qortium_cli.constants import C_TEXT, RESET
 from qortium_cli.crypto import derive_private_key_from_seed_phrase
 from qortium_cli.models import AccountSettings, AppContext, EndpointSettings
 from qortium_cli.services import (
+    check_node_connection,
     qortal_address_from_public,
     qortal_primary_name_for_address,
     qortal_public_key_from_private,
@@ -93,6 +94,48 @@ def _account_from_private_key(ctx: AppContext, private_key: str, api_key: str) -
     )
 
 
+def _confirm_endpoint_connection(base_url: str, timeout_seconds: int) -> bool:
+    connected, detail = check_node_connection(base_url, timeout_seconds)
+    if connected:
+        ok(detail or "Connected to node API.")
+        return True
+
+    warn(f"Node is not connected at {base_url}.")
+    if detail:
+        warn(detail)
+
+    while True:
+        print()
+        print_option("1", "Enter a different endpoint URL")
+        print_option("2", "Continue with this endpoint anyway")
+        choice = read_menu_choice("Choose an option: ").strip()
+
+        if choice == "1":
+            return False
+        if choice == "2":
+            warn("Continuing with endpoint even though the connection check failed.")
+            return True
+
+        warn("Unknown option.")
+
+
+def _prompt_endpoint_url_with_connection_check(
+    prompt: str,
+    default_url: str,
+    timeout_seconds: int,
+) -> str:
+    while True:
+        raw_url = prompt_str(prompt, default_url)
+        try:
+            base_url = normalize_node_url(raw_url)
+        except ValueError as exc:
+            warn(str(exc))
+            continue
+
+        if _confirm_endpoint_connection(base_url, timeout_seconds):
+            return base_url
+
+
 def configure_endpoint_url(ctx: AppContext) -> None:
     current_url = ctx.endpoint.base_url
     while True:
@@ -102,13 +145,16 @@ def configure_endpoint_url(ctx: AppContext) -> None:
         )
         try:
             base_url = normalize_node_url(raw_url)
-            break
         except ValueError as exc:
             warn(str(exc))
+            continue
 
-    if base_url == current_url:
-        warn("Endpoint URL unchanged.")
-        return
+        if base_url == current_url:
+            warn("Endpoint URL unchanged.")
+            return
+
+        if _confirm_endpoint_connection(base_url, ctx.endpoint.timeout_seconds):
+            break
 
     ctx.endpoint = replace(ctx.endpoint, base_url=base_url)
     write_endpoint_file(ctx.settings_dir, ctx.endpoint)
@@ -216,16 +262,11 @@ def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
     current_url = ctx.endpoint.base_url
     current_timeout = ctx.endpoint.timeout_seconds
 
-    while True:
-        raw_url = prompt_str(
-            f"Endpoint URL [{current_url}] (press Enter to use default): ",
-            current_url,
-        )
-        try:
-            base_url = normalize_node_url(raw_url)
-            break
-        except ValueError as exc:
-            warn(str(exc))
+    base_url = _prompt_endpoint_url_with_connection_check(
+        f"Endpoint URL [{current_url}] (press Enter to use default): ",
+        current_url,
+        current_timeout,
+    )
 
     timeout = prompt_int(
         f"Timeout seconds [{current_timeout}] (press Enter to use default): ",
