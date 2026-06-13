@@ -209,6 +209,15 @@ def decode_chat_message(message: Mapping[str, Any]) -> DecodedChatMessage:
         return DecodedChatMessage(body="Unable to decode message", kind="unsupported")
 
 
+def build_chat_message_text(text: str, replied_to: str | None = None) -> str:
+    if not replied_to:
+        return text
+    return json.dumps(
+        {"message": text, "repliedTo": replied_to},
+        separators=(",", ":"),
+    )
+
+
 def is_reaction_chat_message(message: Mapping[str, Any]) -> bool:
     return decode_chat_message(message).kind == "reaction"
 

@@ -12,6 +12,7 @@ import requests
 from qortium_cli.chat_format import (
     MessageReactionSummary,
     MessageThread,
+    build_chat_message_text,
     build_message_reaction_index,
     build_message_threads,
     decode_chat_message,
@@ -237,6 +238,92 @@ def _format_chat_reactions(reactions: tuple[MessageReactionSummary, ...]) -> str
     return "  Reactions: " + "  ".join(
         f"{reaction.content} {reaction.count}" for reaction in reactions
     )
+
+
+def _normalize_chat_message_input(raw: str) -> str:
+    if raw.startswith("//"):
+        return raw[1:]
+    return raw
+
+
+def _print_chat_command_help() -> None:
+    print_section("Chat Commands")
+    print("/edit   Edit one of your own recent text messages.")
+    print("/help   Show this help.")
+    print("/?      Show this help.")
+    print("/quit   Leave chat.")
+    print("//text  Send a message that starts with /.")
+
+
+def _editable_chat_threads(ctx: AppContext, messages: List[Dict[str, Any]]) -> List[MessageThread]:
+    editable: List[MessageThread] = []
+    for thread in build_message_threads(messages):
+        original = dict(thread.original)
+        latest = dict(thread.latest)
+        if _chat_message_sender(original) != ctx.account.account_address:
+            continue
+        if not _chat_message_signature(original):
+            continue
+        if bool(original.get("_unconfirmed", False)):
+            continue
+        if decode_chat_message(latest).kind != "text":
+            continue
+        editable.append(thread)
+    return editable
+
+
+def _format_editable_chat_thread(thread: MessageThread) -> str:
+    timestamp = _format_chat_timestamp(thread.original.get("timestamp"))
+    snippet = _chat_message_snippet(thread)
+    edited_label = " [edited]" if thread.revisions else ""
+    return f"{timestamp} - {snippet}{edited_label}"
+
+
+def _select_editable_chat_thread(ctx: AppContext, messages: List[Dict[str, Any]]) -> MessageThread | None:
+    editable = _editable_chat_threads(ctx, messages)
+    if not editable:
+        warn("No editable messages found in the current chat history.")
+        return None
+
+    print_section("Editable Messages")
+    for index, thread in enumerate(editable, start=1):
+        print_option(str(index), _format_editable_chat_thread(thread))
+    print_option("0", "Cancel")
+
+    while True:
+        choice = read_menu_choice("Choose message to edit: ")
+        if choice == "0":
+            return None
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            return editable[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+
+
+def _run_chat_edit_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> Any | None:
+    thread = _select_editable_chat_thread(ctx, messages)
+    if not thread:
+        return None
+
+    print()
+    print("Current message:")
+    print(f"  {_chat_message_snippet(thread)}")
+    replacement = prompt_str("New message (Enter to cancel): ", "").strip()
+    if not replacement:
+        warn("Edit cancelled.")
+        return None
+
+    original = dict(thread.original)
+    original_signature = _chat_message_signature(original)
+    replied_to = decode_chat_message(original).replied_to
+    message_text = build_chat_message_text(
+        _normalize_chat_message_input(replacement),
+        replied_to,
+    )
+    return _send_chat_message(ctx, message_text, chat_reference=original_signature)
 
 
 def _get_chat_fee_decimal(ctx: AppContext) -> Decimal:
@@ -667,7 +754,7 @@ def _print_chat_timeline(messages: List[Dict[str, Any]]) -> None:
         print()
 
 
-def _send_chat_message(ctx: AppContext, message: str) -> Any:
+def _send_chat_message(ctx: AppContext, message: str, *, chat_reference: str = "") -> Any:
     ensure_wallet_config_ready(ctx)
 
     sender_pub = to_base58_pubkey(ctx.account.public_key)
@@ -687,6 +774,9 @@ def _send_chat_message(ctx: AppContext, message: str) -> Any:
             "isText": 1,
             "isEncrypted": 0,
         }
+        if chat_reference:
+            payload["chatReference"] = chat_reference
+
         unsigned_tx = build_chat(ctx, payload, session)
 
         print("[2/4] Computing nonce (can take 10s-180s on lower-balance accounts)...", flush=True)
@@ -718,7 +808,7 @@ def run_chat_room(ctx: AppContext) -> None:
         print_stat("Fee", d8(_get_chat_fee_decimal(ctx)))
         print()
         print("Type a message and press Enter to send.")
-        print("Use /quit to leave chat. Empty input refreshes.")
+        print("Use /help for commands. Empty input refreshes.")
         print()
 
         try:
@@ -735,13 +825,42 @@ def run_chat_room(ctx: AppContext) -> None:
             return
 
         raw = prompt_str("message > ", "")
-        if raw.strip() == "/quit":
+        stripped = raw.strip()
+        command = stripped.lower()
+        if stripped == "":
+            continue
+        if command == "/quit":
             return
-        if raw.strip() == "":
+        if command in {"/help", "/?"}:
+            _print_chat_command_help()
+            pause()
+            continue
+        if command == "/edit":
+            try:
+                result = _run_chat_edit_command(ctx, messages)
+                if result is None:
+                    pause()
+                    continue
+                ok("Chat edit submitted.")
+                if ctx.debug:
+                    print("Process response: " + str(result))
+                input("Press Enter to refresh chat...")
+            except Exception as exc:
+                error("Failed to edit chat message:")
+                if _is_node_unreachable_error(exc):
+                    _print_node_unreachable_hint(ctx)
+                else:
+                    print(pretty_exception(exc))
+                    _print_debug_traceback(ctx, exc)
+                pause()
+            continue
+        if stripped.startswith("/") and not stripped.startswith("//"):
+            warn("Unknown chat command. Type /help for commands, or use // to send a leading slash.")
+            pause()
             continue
 
         try:
-            result = _send_chat_message(ctx, raw)
+            result = _send_chat_message(ctx, _normalize_chat_message_input(stripped))
             ok("Chat message submitted.")
             if ctx.debug:
                 print("Process response: " + str(result))
