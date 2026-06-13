@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from qortium_cli.constants import BOLD, CHAT_USER_COLORS, QDN_SERVICES, RESET
+from qortium_cli.constants import BOLD, CHAT_USER_COLORS, C_TEXT, QDN_SERVICES, RESET
 from qortium_cli.crypto import b58decode, b58encode, is_base58, to_base58_pubkey
 from qortium_cli.models import AppContext, ToolPlugin
 from qortium_cli.services import (
@@ -963,9 +963,9 @@ def tx_group_create(ctx: AppContext) -> None:
 
 def tx_name_register(ctx: AppContext) -> None:
     ensure_wallet_config_ready(ctx)
-    name = prompt_str("Name to register: ").strip()
+    name = prompt_str("Name to register (Enter to cancel): ").strip()
     if not name:
-        warn("Name cannot be empty.")
+        warn("Name registration cancelled.")
         return
 
     name_data = prompt_str("Name data [{}]: ", "{}")
@@ -980,6 +980,59 @@ def tx_name_register(ctx: AppContext) -> None:
             "registrantPublicKey": sender_pub,
             "name": name,
             "data": name_data,
+        },
+        fee,
+        tx_group_id,
+    )
+
+
+def _select_owned_name_for_update(owned_names: List[str]) -> str | None:
+    print()
+    print_section("Choose Name")
+    for index, name in enumerate(owned_names, start=1):
+        print_option(str(index), name)
+    print_option("0", "Cancel")
+    choice = read_menu_choice("Choose a name: ")
+    if choice == "0":
+        warn("Name update cancelled.")
+        return None
+
+    try:
+        selected_index = int(choice) - 1
+        return owned_names[selected_index]
+    except (ValueError, IndexError):
+        warn("Unknown option.")
+        return None
+
+
+def tx_name_update(ctx: AppContext, owned_names: List[str]) -> None:
+    ensure_wallet_config_ready(ctx)
+    selected_name = _select_owned_name_for_update(owned_names)
+    if not selected_name:
+        return
+
+    new_name = prompt_str(
+        f"New name for '{selected_name}' [keep current]: ",
+        "",
+    )
+
+    new_data = prompt_str(
+        "New name data [keep current]: ",
+        "",
+    )
+
+    fee, tx_group_id = _prompt_tx_common_inputs(default_fee=Decimal("0"))
+    sender_pub = to_base58_pubkey(ctx.account.public_key)
+
+    _submit_builder_transaction(
+        ctx,
+        "/names/update",
+        "UPDATE_NAME",
+        {
+            "ownerPublicKey": sender_pub,
+            "name": selected_name,
+            "newName": new_name.strip(),
+            "newData": new_data,
         },
         fee,
         tx_group_id,
@@ -1320,10 +1373,45 @@ def tool_groups(ctx: AppContext) -> None:
 
 
 def tool_register_name(ctx: AppContext) -> None:
+    ensure_wallet_config_ready(ctx)
     print_banner(ctx.endpoint.base_url, "Register Name")
     print_stat("Account", ctx.account.account_address)
     print()
-    tx_name_register(ctx)
+
+    with make_session(ctx, include_api_key=False) as session:
+        owned_names = get_account_names(
+            ctx,
+            ctx.account.account_address,
+            session,
+            limit=500,
+        )
+
+    if not owned_names:
+        tx_name_register(ctx)
+        pause()
+        return
+
+    print_section("Registered Names")
+    for name in owned_names:
+        print(C_TEXT + f"- {name}" + RESET)
+    print()
+    print_option("1", "Update name")
+    print_option("2", "New name")
+    print_option("0", "Back")
+
+    choice = read_menu_choice("Choose an option: ")
+    if choice == "0":
+        return
+    if choice == "1":
+        tx_name_update(ctx, owned_names)
+        pause()
+        return
+    if choice == "2":
+        tx_name_register(ctx)
+        pause()
+        return
+
+    warn("Unknown option.")
     pause()
 
 

@@ -215,6 +215,12 @@ The main menu is organized as:
 6. `QDN Resources`
 9. `Reconfigure endpoint/config`
 
+`Register Name` checks the configured wallet for existing registered names first.
+If none are found, it opens the normal registration prompt. If names already
+exist, it lists them and lets you choose `Update name` or `New name`; choose `0`
+to go back. At the register-name prompt, press Enter without typing a name to
+cancel.
+
 The Groups menu contains:
 
 - `Join group (/groups/join)`
