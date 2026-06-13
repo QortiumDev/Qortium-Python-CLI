@@ -27,7 +27,13 @@ from qortium_cli.ui import (
     warn,
 )
 from qortium_cli.validators import is_placeholder, normalize_node_url
-from qortium_cli.wallet_backup import normalize_wallet_file_path, private_key_from_wallet_file
+from qortium_cli.wallet_backup import (
+    default_wallet_backup_path,
+    generate_new_wallet_backup,
+    normalize_wallet_file_path,
+    private_key_from_wallet_file,
+    write_wallet_backup,
+)
 
 
 def current_endpoint_values_ready(ctx: AppContext) -> bool:
@@ -55,9 +61,10 @@ def _prompt_private_key() -> str:
     print()
     print_option("1", "Use private key")
     print_option("2", "Use seed phrase")
-    print_option("3", "Use Qortium Home wallet file")
-    mode = read_menu_choice("Choose key input mode [1/2/3]: ").strip() or "1"
-    if mode not in {"1", "2", "3"}:
+    print_option("3", "Use wallet file")
+    print_option("4", "New wallet file")
+    mode = read_menu_choice("Choose key input mode [1/2/3/4]: ").strip() or "1"
+    if mode not in {"1", "2", "3", "4"}:
         mode = "1"
 
     if mode == "1":
@@ -66,7 +73,7 @@ def _prompt_private_key() -> str:
         seed_phrase = prompt_secret("Seed phrase: ").strip()
         private_key = derive_private_key_from_seed_phrase(seed_phrase)
         ok("Derived private key from seed phrase.")
-    else:
+    elif mode == "3":
         raw_wallet_path = prompt_str("Wallet file path: ")
         if not raw_wallet_path.strip():
             raise RuntimeError("Wallet file path is empty.")
@@ -74,6 +81,29 @@ def _prompt_private_key() -> str:
         wallet_password = prompt_secret("Wallet password: ")
         private_key = private_key_from_wallet_file(wallet_path, wallet_password)
         ok("Unlocked Qortium Home wallet file.")
+    elif mode == "4":
+        wallet_password = prompt_secret("New wallet password: ")
+        confirm_password = prompt_secret("Confirm wallet password: ")
+        if wallet_password != confirm_password:
+            raise RuntimeError("Wallet passwords do not match.")
+        generated_wallet = generate_new_wallet_backup(wallet_password)
+        wallet_name = prompt_str("Wallet name [wallet]: ", "wallet").strip() or "wallet"
+        default_path = default_wallet_backup_path(
+            generated_wallet.address,
+            wallet_name=wallet_name,
+        )
+        raw_output_path = prompt_str(
+            f"Wallet backup path [{default_path}]: ",
+            str(default_path),
+        )
+        output_path = write_wallet_backup(
+            normalize_wallet_file_path(raw_output_path),
+            generated_wallet.wallet,
+        )
+        ok("Created encrypted Qortium Home wallet file.")
+        print(C_TEXT + f"Wallet file: {output_path}" + RESET)
+        print(C_TEXT + f"Account: {generated_wallet.address}" + RESET)
+        private_key = generated_wallet.private_key
 
     if not private_key:
         raise RuntimeError("Private key is empty.")

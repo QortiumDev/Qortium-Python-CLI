@@ -18,6 +18,7 @@ from qortium_cli.storage import (
     write_config_file,
     write_endpoint_file,
 )
+from qortium_cli.wallet_backup import GeneratedWalletBackup, QORTIUM_WALLET_VERSION
 
 
 def make_context(settings_dir: Path) -> AppContext:
@@ -200,16 +201,103 @@ class ReconfigureTests(TestCase):
                     "qortium_cli.setup_wizard._account_from_private_key",
                     return_value=next_account,
                 ) as account_from_private_key,
+                patch("qortium_cli.setup_wizard.print_option") as print_option,
                 patch("qortium_cli.setup_wizard.ok"),
             ):
                 configure_wallet_identity(ctx)
 
             saved = load_account_settings(settings_dir)
 
+            print_option.assert_any_call("3", "Use wallet file")
+            print_option.assert_any_call("4", "New wallet file")
             private_key_from_wallet_file.assert_called_once_with(wallet_path.resolve(), "wallet-password")
             account_from_private_key.assert_called_once_with(ctx, "wallet-private-key", "old-api-key")
             self.assertEqual(ctx.account.private_key, "wallet-private-key")
             self.assertEqual(saved.private_key, "wallet-private-key")
+
+    def test_configure_wallet_identity_can_create_new_wallet_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings_dir = Path(tmp)
+            ctx = make_context(settings_dir)
+            output_path = settings_dir / "new-wallet.json"
+            generated_wallet = GeneratedWalletBackup(
+                address="Qnew",
+                private_key="new-private-key",
+                wallet={"address0": "Qnew", "version": QORTIUM_WALLET_VERSION},
+            )
+            next_account = AccountSettings(
+                name="new-account",
+                account_address="Qnew",
+                public_key="new-public-key",
+                private_key="new-private-key",
+                api_key="old-api-key",
+            )
+
+            with (
+                patch("qortium_cli.setup_wizard.read_menu_choice", return_value="4"),
+                patch(
+                    "qortium_cli.setup_wizard.prompt_secret",
+                    side_effect=["wallet-password", "wallet-password"],
+                ),
+                patch(
+                    "qortium_cli.setup_wizard.prompt_str",
+                    side_effect=["My Wallet", str(output_path)],
+                ),
+                patch(
+                    "qortium_cli.setup_wizard.generate_new_wallet_backup",
+                    return_value=generated_wallet,
+                ) as generate_new_wallet,
+                patch(
+                    "qortium_cli.setup_wizard.default_wallet_backup_path",
+                    return_value=output_path,
+                ) as default_path,
+                patch(
+                    "qortium_cli.setup_wizard.write_wallet_backup",
+                    return_value=output_path,
+                ) as write_wallet_backup,
+                patch(
+                    "qortium_cli.setup_wizard._account_from_private_key",
+                    return_value=next_account,
+                ) as account_from_private_key,
+                patch("qortium_cli.setup_wizard.ok"),
+            ):
+                configure_wallet_identity(ctx)
+
+            saved = load_account_settings(settings_dir)
+
+            generate_new_wallet.assert_called_once_with("wallet-password")
+            default_path.assert_called_once_with("Qnew", wallet_name="My Wallet")
+            write_wallet_backup.assert_called_once_with(
+                output_path.resolve(),
+                generated_wallet.wallet,
+            )
+            account_from_private_key.assert_called_once_with(
+                ctx,
+                "new-private-key",
+                "old-api-key",
+            )
+            self.assertEqual(ctx.account.private_key, "new-private-key")
+            self.assertEqual(saved.private_key, "new-private-key")
+
+    def test_configure_wallet_identity_does_not_create_wallet_on_password_mismatch(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings_dir = Path(tmp)
+            ctx = make_context(settings_dir)
+
+            with (
+                patch("qortium_cli.setup_wizard.read_menu_choice", return_value="4"),
+                patch(
+                    "qortium_cli.setup_wizard.prompt_secret",
+                    side_effect=["first-password", "different-password"],
+                ),
+                patch("qortium_cli.setup_wizard.generate_new_wallet_backup") as generate_new_wallet,
+                patch("qortium_cli.setup_wizard.write_wallet_backup") as write_wallet_backup,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Wallet passwords do not match"):
+                    configure_wallet_identity(ctx)
+
+            generate_new_wallet.assert_not_called()
+            write_wallet_backup.assert_not_called()
 
     def test_configure_endpoint_url_retries_after_failed_connection(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import hmac
 import json
@@ -20,6 +21,13 @@ QORTIUM_PRIVATE_KEY_WALLET_VERSION = 3
 QORTIUM_WALLET_VERSION = 2
 PRIVATE_KEY_BYTES = 32
 MASTER_SEED_BYTES = 64
+
+
+@dataclass(frozen=True)
+class GeneratedWalletBackup:
+    address: str
+    private_key: str
+    wallet: Dict[str, Any]
 
 
 def qortal_address_from_private_seed(seed: bytes) -> str:
@@ -184,6 +192,89 @@ def private_key_from_wallet_file(path: str | Path, password: str) -> str:
     return private_key_from_wallet(wallet, password)
 
 
+def _encrypt_wallet_payload(
+    payload: bytes,
+    address: str,
+    password: str,
+    version: int,
+    *,
+    salt: bytes | None = None,
+    iv: bytes | None = None,
+) -> Dict[str, Any]:
+    wallet_address = str(address or "").strip()
+    if not wallet_address:
+        raise ValueError("Wallet address is empty.")
+
+    wallet_password = str(password or "")
+    if not wallet_password:
+        raise ValueError("Wallet backup password cannot be empty.")
+
+    salt_bytes = os.urandom(32) if salt is None else bytes(salt)
+    iv_bytes = os.urandom(16) if iv is None else bytes(iv)
+    if len(salt_bytes) != 32:
+        raise ValueError("Wallet backup salt must be exactly 32 bytes.")
+    if len(iv_bytes) != 16:
+        raise ValueError("Wallet backup IV must be exactly 16 bytes.")
+    if len(payload) == 0 or len(payload) % 16 != 0:
+        raise ValueError("Wallet backup payload length is invalid.")
+
+    key = qortal_hub_kdf(wallet_password)
+    encryption_key = key[:32]
+    mac_key = key[32:63]
+
+    encryptor = Cipher(
+        algorithms.AES(encryption_key),
+        modes.CBC(iv_bytes),
+    ).encryptor()
+    encrypted_seed = encryptor.update(payload) + encryptor.finalize()
+    mac = hmac.new(mac_key, encrypted_seed, hashlib.sha512).digest()
+
+    return {
+        "address0": wallet_address,
+        "encryptedSeed": b58encode(encrypted_seed),
+        "salt": b58encode(salt_bytes),
+        "iv": b58encode(iv_bytes),
+        "version": version,
+        "mac": b58encode(mac),
+        "kdfThreads": KDF_THREADS,
+    }
+
+
+def generate_wallet_backup_from_master_seed(
+    master_seed: bytes,
+    password: str,
+    *,
+    salt: bytes | None = None,
+    iv: bytes | None = None,
+) -> GeneratedWalletBackup:
+    master_seed_bytes = bytes(master_seed)
+    if len(master_seed_bytes) != MASTER_SEED_BYTES:
+        raise ValueError("Qortium Home master seed must be exactly 64 bytes.")
+
+    private_seed = derive_address_seed(master_seed_bytes, 0)
+    address = qortal_address_from_private_seed(private_seed)
+    wallet = _encrypt_wallet_payload(
+        master_seed_bytes,
+        address,
+        password,
+        QORTIUM_WALLET_VERSION,
+        salt=salt,
+        iv=iv,
+    )
+    return GeneratedWalletBackup(
+        address=address,
+        private_key=b58encode(private_seed),
+        wallet=wallet,
+    )
+
+
+def generate_new_wallet_backup(password: str) -> GeneratedWalletBackup:
+    return generate_wallet_backup_from_master_seed(
+        os.urandom(MASTER_SEED_BYTES),
+        password,
+    )
+
+
 def generate_wallet_backup_from_private_key(
     private_key: str,
     address: str,
@@ -203,37 +294,14 @@ def generate_wallet_backup_from_private_key(
             "Private key does not match the configured wallet address."
         )
 
-    wallet_password = str(password or "")
-    if not wallet_password:
-        raise ValueError("Wallet backup password cannot be empty.")
-
-    salt_bytes = os.urandom(32) if salt is None else bytes(salt)
-    iv_bytes = os.urandom(16) if iv is None else bytes(iv)
-    if len(salt_bytes) != 32:
-        raise ValueError("Wallet backup salt must be exactly 32 bytes.")
-    if len(iv_bytes) != 16:
-        raise ValueError("Wallet backup IV must be exactly 16 bytes.")
-
-    key = qortal_hub_kdf(wallet_password)
-    encryption_key = key[:32]
-    mac_key = key[32:63]
-
-    encryptor = Cipher(
-        algorithms.AES(encryption_key),
-        modes.CBC(iv_bytes),
-    ).encryptor()
-    encrypted_seed = encryptor.update(private_seed) + encryptor.finalize()
-    mac = hmac.new(mac_key, encrypted_seed, hashlib.sha512).digest()
-
-    return {
-        "address0": wallet_address,
-        "encryptedSeed": b58encode(encrypted_seed),
-        "salt": b58encode(salt_bytes),
-        "iv": b58encode(iv_bytes),
-        "version": QORTIUM_PRIVATE_KEY_WALLET_VERSION,
-        "mac": b58encode(mac),
-        "kdfThreads": KDF_THREADS,
-    }
+    return _encrypt_wallet_payload(
+        private_seed,
+        wallet_address,
+        password,
+        QORTIUM_PRIVATE_KEY_WALLET_VERSION,
+        salt=salt,
+        iv=iv,
+    )
 
 
 def write_wallet_backup(path: Path, backup: Dict[str, Any]) -> Path:
