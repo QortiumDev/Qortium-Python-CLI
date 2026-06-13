@@ -1111,7 +1111,6 @@ def run_chat_room(ctx: AppContext) -> None:
         print_stat("Fee", d8(_get_chat_fee_decimal(ctx)))
         print()
         print("Type a message and press Enter to send.")
-        print("Use /help for commands. Empty input refreshes.")
         print()
 
         try:
@@ -1127,6 +1126,7 @@ def run_chat_room(ctx: AppContext) -> None:
             pause()
             return
 
+        print("/? for help")
         raw = prompt_str("message > ", "")
         stripped = raw.strip()
         command = stripped.lower()

@@ -17,6 +17,7 @@ from qortium_cli.tools import (
     _run_chat_reaction_command,
     _run_chat_reply_command,
     _send_chat_message,
+    run_chat_room,
 )
 
 
@@ -96,6 +97,25 @@ class ChatCommandTests(TestCase):
         self.assertEqual(_normalize_chat_message_input("//help"), "/help")
         self.assertEqual(_normalize_chat_message_input("/help"), "/help")
         self.assertEqual(_normalize_chat_message_input("hello"), "hello")
+
+    def test_run_chat_room_prints_help_hint_after_timeline(self) -> None:
+        ctx = make_context()
+
+        with (
+            patch("qortium_cli.tools.ensure_wallet_config_ready"),
+            patch("qortium_cli.tools.print_banner"),
+            patch("qortium_cli.tools._fetch_chat_timeline", return_value=[]),
+            patch("qortium_cli.tools._print_chat_timeline", side_effect=lambda messages: print("timeline\n")),
+            patch("qortium_cli.tools.prompt_str", return_value="/quit") as prompt,
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                run_chat_room(ctx)
+
+        text = output.getvalue()
+        self.assertIn("timeline\n\n/? for help\n", text)
+        self.assertNotIn("Use /help for commands", text)
+        prompt.assert_called_once_with("message > ", "")
 
     def test_editable_chat_threads_only_include_own_confirmed_text_messages(self) -> None:
         ctx = make_context()
