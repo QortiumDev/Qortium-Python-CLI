@@ -42,13 +42,17 @@ On first launch, setup asks for:
 1. Endpoint URL (default: `http://127.0.0.1:24891`)
 2. Timeout seconds
 3. API key
-4. Wallet key: Base58 private key or seed phrase
+4. Wallet key: Base58 private key, seed phrase, or Qortium Home wallet file
 
 Then it auto-fills:
 
 - public key
 - account address
 - display name (primary name if available)
+
+For a Qortium Home wallet file, choose the wallet-file option, enter the JSON
+backup path, then enter the wallet password. Version 2 master-seed wallets use
+address `0`; version 3 private-key wallets use the stored private key directly.
 
 The endpoint URL is checked with `/admin/status` when selected. If the node is not
 connected or does not return node status, setup lets you enter a different endpoint

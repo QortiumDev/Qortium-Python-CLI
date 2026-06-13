@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from qortium_cli.constants import C_TEXT, RESET
 from qortium_cli.core_detection import detect_local_core_api_key
@@ -27,6 +28,7 @@ from qortium_cli.ui import (
     warn,
 )
 from qortium_cli.validators import is_placeholder, normalize_node_url
+from qortium_cli.wallet_backup import private_key_from_wallet_file
 
 
 def current_endpoint_values_ready(ctx: AppContext) -> bool:
@@ -54,16 +56,24 @@ def _prompt_private_key() -> str:
     print()
     print_option("1", "Use private key")
     print_option("2", "Use seed phrase")
-    mode = read_menu_choice("Choose key input mode [1/2]: ").strip() or "1"
-    if mode not in {"1", "2"}:
+    print_option("3", "Use Qortium Home wallet file")
+    mode = read_menu_choice("Choose key input mode [1/2/3]: ").strip() or "1"
+    if mode not in {"1", "2", "3"}:
         mode = "1"
 
     if mode == "1":
         private_key = prompt_secret("Private key: ").strip()
-    else:
+    elif mode == "2":
         seed_phrase = prompt_secret("Seed phrase: ").strip()
         private_key = derive_private_key_from_seed_phrase(seed_phrase)
         ok("Derived private key from seed phrase.")
+    else:
+        wallet_path = prompt_str("Wallet file path: ").strip()
+        if not wallet_path:
+            raise RuntimeError("Wallet file path is empty.")
+        wallet_password = prompt_secret("Wallet password: ")
+        private_key = private_key_from_wallet_file(Path(wallet_path), wallet_password)
+        ok("Unlocked Qortium Home wallet file.")
 
     if not private_key:
         raise RuntimeError("Private key is empty.")

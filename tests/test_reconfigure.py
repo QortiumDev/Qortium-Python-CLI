@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 from qortium_cli.core_detection import LocalCoreApiKey
 from qortium_cli.models import AccountSettings, AppContext, ChatSettings, EndpointSettings
-from qortium_cli.setup_wizard import configure_api_key, configure_endpoint_url, run_reconfigure_menu
+from qortium_cli.setup_wizard import (
+    configure_api_key,
+    configure_endpoint_url,
+    configure_wallet_identity,
+    run_reconfigure_menu,
+)
 from qortium_cli.storage import (
     load_account_settings,
     load_endpoint_settings,
@@ -101,6 +106,42 @@ class ReconfigureTests(TestCase):
 
             self.assertEqual(saved.api_key, "new-api-key")
             self.assertEqual(saved.private_key, "old-private-key")
+
+    def test_configure_wallet_identity_accepts_wallet_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings_dir = Path(tmp)
+            ctx = make_context(settings_dir)
+            wallet_path = settings_dir / "wallet.json"
+            next_account = AccountSettings(
+                name="wallet-account",
+                account_address="Qwallet",
+                public_key="wallet-public-key",
+                private_key="wallet-private-key",
+                api_key="old-api-key",
+            )
+
+            with (
+                patch("qortium_cli.setup_wizard.read_menu_choice", return_value="3"),
+                patch("qortium_cli.setup_wizard.prompt_str", return_value=str(wallet_path)),
+                patch("qortium_cli.setup_wizard.prompt_secret", return_value="wallet-password"),
+                patch(
+                    "qortium_cli.setup_wizard.private_key_from_wallet_file",
+                    return_value="wallet-private-key",
+                ) as private_key_from_wallet_file,
+                patch(
+                    "qortium_cli.setup_wizard._account_from_private_key",
+                    return_value=next_account,
+                ) as account_from_private_key,
+                patch("qortium_cli.setup_wizard.ok"),
+            ):
+                configure_wallet_identity(ctx)
+
+            saved = load_account_settings(settings_dir)
+
+            private_key_from_wallet_file.assert_called_once_with(wallet_path, "wallet-password")
+            account_from_private_key.assert_called_once_with(ctx, "wallet-private-key", "old-api-key")
+            self.assertEqual(ctx.account.private_key, "wallet-private-key")
+            self.assertEqual(saved.private_key, "wallet-private-key")
 
     def test_configure_endpoint_url_retries_after_failed_connection(self) -> None:
         with TemporaryDirectory() as tmp:
