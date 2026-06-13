@@ -29,6 +29,18 @@ pipx install "git+https://github.com/QortiumDev/Qortium-Python-CLI.git"
 pipx upgrade qortium-cli
 ```
 
+### Startup Update Checks
+
+On interactive startup, the CLI checks the GitHub releases page at most once per
+day and lets you know when a newer release is available.
+
+- The newest stable release is shown when it is newer than the installed CLI.
+- A prerelease is shown first only when it is newer than both the installed CLI
+  and the newest stable release.
+- A prerelease is not offered when the newest stable release is newer.
+
+Set `QORTIUM_CLI_NO_UPDATE_CHECK=1` before launch to skip startup update checks.
+
 ## 3) Start The App
 
 ```bash
@@ -213,6 +225,7 @@ The main menu is organized as:
 4. `Register Name`
 5. `Wallet`
 6. `QDN Resources`
+8. `Help/Info`
 9. `Reconfigure endpoint/config`
 
 `Register Name` checks the configured wallet for existing registered names first.

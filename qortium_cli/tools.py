@@ -98,6 +98,7 @@ WHATS_NEW_ENTRIES = (
             "Setup can check endpoints, detect local Core API keys, import wallet files, "
             "and create encrypted wallet files.",
             "Register Name can list owned names and update an existing name.",
+            "Startup checks GitHub releases and lists newer stable or qualifying prerelease builds.",
         ),
     ),
 )

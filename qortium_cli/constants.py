@@ -1,6 +1,7 @@
 from colorama import Fore, Style
 
-APP_TITLE = "Qortium CLI 0.3.0"
+APP_VERSION = "0.3.0"
+APP_TITLE = f"Qortium CLI {APP_VERSION}"
 SETUP_TITLE = "Qortium Setup"
 
 DEFAULT_BASE_URL = "http://127.0.0.1:24891"
