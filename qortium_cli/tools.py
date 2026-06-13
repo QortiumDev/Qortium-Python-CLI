@@ -87,6 +87,20 @@ ENABLE_SEND_PAYMENTS = True
 APPROVAL_THRESHOLDS = ("NONE", "ONE", "PCT20", "PCT40", "PCT60", "PCT80", "PCT100")
 ATOMIC_UNITS = Decimal("100000000")
 QDN_RESOURCE_PAGE_SIZE = 10
+WHATS_NEW_ENTRIES = (
+    (
+        "v0.3.0",
+        (
+            "Chat timeline now understands Qortium Chat reply, edit, and reaction envelopes.",
+            "Chat commands added: /reply, /edit, /react, /help, and /?.",
+            "Reply and reaction selection groups messages by sender to reduce long lists.",
+            "Reaction picker supports add/remove flows and emoji categories.",
+            "Setup can check endpoints, detect local Core API keys, import wallet files, "
+            "and create encrypted wallet files.",
+            "Register Name can list owned names and update an existing name.",
+        ),
+    ),
+)
 
 
 def _chat_user_color(identity: str) -> str:
@@ -2508,6 +2522,55 @@ def tool_wallet(ctx: AppContext) -> None:
         pause()
 
 
+def _print_whats_new_entry(version: str, bullets: tuple[str, ...]) -> None:
+    print_section(version)
+    for bullet in bullets:
+        print(C_TEXT + f"- {bullet}" + RESET)
+
+
+def _tool_whats_new(ctx: AppContext) -> None:
+    while True:
+        print_banner(ctx.endpoint.base_url, "What's New?")
+        for index, (version, _) in enumerate(WHATS_NEW_ENTRIES, start=1):
+            print_option(str(index), version)
+        print_option("0", "Back")
+
+        choice = read_menu_choice("Choose a version: ")
+        if choice == "0":
+            return
+
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            version, bullets = WHATS_NEW_ENTRIES[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+            pause()
+            continue
+
+        print_banner(ctx.endpoint.base_url, f"What's New? {version}")
+        _print_whats_new_entry(version, bullets)
+        pause()
+
+
+def tool_help_info(ctx: AppContext) -> None:
+    while True:
+        print_banner(ctx.endpoint.base_url, "Help/Info")
+        print_option("1", "What's New?")
+        print_option("0", "Back")
+
+        choice = read_menu_choice("Choose an option: ")
+        if choice == "0":
+            return
+        if choice == "1":
+            _tool_whats_new(ctx)
+            continue
+
+        warn("Unknown option.")
+        pause()
+
+
 def build_tool_plugins() -> List[ToolPlugin]:
     tools = [
         ToolPlugin("1", "Node", "Node status and admin controls", tool_node),
@@ -2523,6 +2586,14 @@ def build_tool_plugins() -> List[ToolPlugin]:
             "QDN Resources",
             "Publish APPs or delete arbitrary resources",
             tool_qdn_resources,
+        )
+    )
+    tools.append(
+        ToolPlugin(
+            "8",
+            "Help/Info",
+            "Documentation and changelog",
+            tool_help_info,
         )
     )
     return tools
