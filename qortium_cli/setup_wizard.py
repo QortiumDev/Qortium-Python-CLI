@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from qortium_cli.constants import C_TEXT, RESET
+from qortium_cli.core_detection import detect_local_core_api_key
 from qortium_cli.crypto import derive_private_key_from_seed_phrase
 from qortium_cli.models import AccountSettings, AppContext, EndpointSettings
 from qortium_cli.services import (
@@ -136,6 +137,29 @@ def _prompt_endpoint_url_with_connection_check(
             return base_url
 
 
+def _detect_local_core_api_key(ctx: AppContext):
+    suggestion = detect_local_core_api_key(ctx.endpoint.base_url)
+    if suggestion:
+        ok(f"Detected local Core API key at: {suggestion.api_key_path}")
+    return suggestion
+
+
+def _prompt_required_api_key(ctx: AppContext, existing_api_key: str = "") -> str:
+    has_existing_api_key = bool(existing_api_key) and (not is_placeholder(existing_api_key))
+    if has_existing_api_key:
+        api_key = prompt_secret("API key (X-API-KEY) (press Enter to keep current): ").strip()
+        return api_key or existing_api_key
+
+    suggestion = _detect_local_core_api_key(ctx)
+    if suggestion:
+        api_key = prompt_secret(
+            "API key (X-API-KEY) [detected local Core key] (press Enter to use): "
+        ).strip()
+        return api_key or suggestion.api_key
+
+    return prompt_secret("API key (X-API-KEY): ").strip()
+
+
 def configure_endpoint_url(ctx: AppContext) -> None:
     current_url = ctx.endpoint.base_url
     while True:
@@ -178,7 +202,19 @@ def configure_timeout(ctx: AppContext) -> None:
 
 
 def configure_api_key(ctx: AppContext) -> None:
-    api_key = prompt_secret("New API key (press Enter to cancel): ").strip()
+    suggestion = _detect_local_core_api_key(ctx)
+    if suggestion:
+        api_key = prompt_secret(
+            "New API key [detected local Core key] "
+            "(press Enter to use, type /cancel to cancel): "
+        ).strip()
+        if not api_key:
+            api_key = suggestion.api_key
+        elif api_key.lower() == "/cancel":
+            api_key = ""
+    else:
+        api_key = prompt_secret("New API key (press Enter to cancel): ").strip()
+
     if not api_key:
         warn("API key unchanged.")
         return
@@ -278,13 +314,7 @@ def configure_first_run_files(ctx: AppContext, force: bool = False) -> None:
     ctx.endpoint = endpoint
 
     existing_api_key = (ctx.account.api_key or "").strip()
-    has_existing_api_key = bool(existing_api_key) and (not is_placeholder(existing_api_key))
-    if has_existing_api_key:
-        api_key = prompt_secret("API key (X-API-KEY) (press Enter to keep current): ").strip()
-        if not api_key:
-            api_key = existing_api_key
-    else:
-        api_key = prompt_secret("API key (X-API-KEY): ").strip()
+    api_key = _prompt_required_api_key(ctx, existing_api_key)
 
     if not api_key:
         raise RuntimeError("API key is required to continue setup.")

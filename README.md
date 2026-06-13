@@ -54,6 +54,11 @@ The endpoint URL is checked with `/admin/status` when selected. If the node is n
 connected or does not return node status, setup lets you enter a different endpoint
 or continue with the selected endpoint anyway.
 
+When the selected endpoint is local, the CLI tries to detect a running
+Qortium/Qortal Core process and read its `apikey.txt`. If exactly one matching
+local Core API key is found, setup offers it as the default without printing the
+key; press Enter at the API-key prompt to use it.
+
 ## 5) Runtime Settings Files
 
 The app writes runtime settings here:
@@ -77,6 +82,8 @@ Optional custom location:
   or wallet key independently.
 - Endpoint URL changes run the same connection check and can be retried or kept
   anyway if the node is offline.
+- API key changes also look for a matching local Core `apikey.txt`; when one is
+  found, press Enter to use it or type a different key.
 - Changing the API key does not ask for, replace, or re-derive your private key.
 - Delete the runtime settings files above to run first-time setup again.
 
@@ -84,7 +91,9 @@ Optional custom location:
 
 - `qortium-cli: command not found`: open a new terminal after `pipx ensurepath`, or add pipx bin dir to `PATH`.
 - Cannot reach node/API: verify your node is running and listening on `127.0.0.1:24891`.
-- API key prompt blocks setup: enter a valid `X-API-KEY`; in the reconfigure menu, press Enter to cancel without changing it.
+- API key prompt blocks setup: enter a valid `X-API-KEY`; if local Core detection
+  finds a key, press Enter to use it. In the reconfigure menu, type `/cancel` to
+  cancel a detected-key prompt without changing it.
 
 ## 8) Sign And Submit Raw Transactions
 
