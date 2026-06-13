@@ -10,11 +10,13 @@ from typing import Any, Dict, List
 import requests
 
 from qortium_cli.chat_format import (
+    DEFAULT_REACTION_OPTIONS,
     MessageReactionSummary,
     MessageThread,
     build_chat_message_text,
     build_message_reaction_index,
     build_message_threads,
+    build_reaction_message_text,
     decode_chat_message,
 )
 from qortium_cli.constants import BOLD, CHAT_USER_COLORS, C_TEXT, QDN_SERVICES, RESET
@@ -249,6 +251,7 @@ def _normalize_chat_message_input(raw: str) -> str:
 def _print_chat_command_help() -> None:
     print_section("Chat Commands")
     print("/reply  Reply to a recent message.")
+    print("/react  React to a recent message.")
     print("/edit   Edit one of your own recent text messages.")
     print("/help   Show this help.")
     print("/?      Show this help.")
@@ -309,19 +312,27 @@ def _format_replyable_chat_thread(thread: MessageThread) -> str:
     return f"{timestamp} - {snippet}{edited_label}"
 
 
-def _select_replyable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThread | None:
+def _select_chat_thread_by_sender(
+    messages: List[Dict[str, Any]],
+    *,
+    sender_section_title: str,
+    sender_prompt: str,
+    message_section_prefix: str,
+    message_prompt: str,
+    empty_warning: str,
+) -> MessageThread | None:
     user_groups = _replyable_chat_user_groups(messages)
     if not user_groups:
-        warn("No replyable messages found in the current chat history.")
+        warn(empty_warning)
         return None
 
     while True:
-        print_section("Reply Sender")
+        print_section(sender_section_title)
         for index, (_, label, threads) in enumerate(user_groups, start=1):
             print_option(str(index), _format_replyable_chat_user(label, threads))
         print_option("0", "Cancel")
 
-        choice = read_menu_choice("Choose sender to reply to: ")
+        choice = read_menu_choice(sender_prompt)
         if choice == "0":
             return None
         try:
@@ -333,13 +344,13 @@ def _select_replyable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThre
             warn("Unknown option.")
             continue
 
-        print_section(f"Messages From {label}")
+        print_section(f"{message_section_prefix} {label}")
         for index, thread in enumerate(sender_threads, start=1):
             print_option(str(index), _format_replyable_chat_thread(thread))
         print_option("0", "Back")
 
         while True:
-            choice = read_menu_choice("Choose message to reply to: ")
+            choice = read_menu_choice(message_prompt)
             if choice == "0":
                 break
             try:
@@ -349,6 +360,55 @@ def _select_replyable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThre
                 return sender_threads[selected_index]
             except (ValueError, IndexError):
                 warn("Unknown option.")
+
+
+def _select_replyable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThread | None:
+    return _select_chat_thread_by_sender(
+        messages,
+        sender_section_title="Reply Sender",
+        sender_prompt="Choose sender to reply to: ",
+        message_section_prefix="Messages From",
+        message_prompt="Choose message to reply to: ",
+        empty_warning="No replyable messages found in the current chat history.",
+    )
+
+
+def _select_reactable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThread | None:
+    return _select_chat_thread_by_sender(
+        messages,
+        sender_section_title="Reaction Sender",
+        sender_prompt="Choose sender to react to: ",
+        message_section_prefix="Messages From",
+        message_prompt="Choose message to react to: ",
+        empty_warning="No reactable messages found in the current chat history.",
+    )
+
+
+def _select_chat_reaction(
+    reactions: tuple[MessageReactionSummary, ...],
+) -> tuple[str, bool] | None:
+    self_reactions = {
+        reaction.content for reaction in reactions if reaction.reacted_by_self
+    }
+
+    print_section("Reaction")
+    for index, reaction in enumerate(DEFAULT_REACTION_OPTIONS, start=1):
+        action_label = "remove" if reaction in self_reactions else "add"
+        print_option(str(index), f"{reaction} ({action_label})")
+    print_option("0", "Cancel")
+
+    while True:
+        choice = read_menu_choice("Choose reaction: ")
+        if choice == "0":
+            return None
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            reaction = DEFAULT_REACTION_OPTIONS[selected_index]
+            return reaction, reaction not in self_reactions
+        except (ValueError, IndexError):
+            warn("Unknown option.")
 
 
 def _editable_chat_threads(ctx: AppContext, messages: List[Dict[str, Any]]) -> List[MessageThread]:
@@ -418,6 +478,31 @@ def _run_chat_reply_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> 
         target_signature,
     )
     return _send_chat_message(ctx, message_text)
+
+
+def _run_chat_reaction_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> Any | None:
+    thread = _select_reactable_chat_thread(messages)
+    if not thread:
+        return None
+
+    target_signature = _chat_message_signature(dict(thread.original))
+    reactions_by_signature = build_message_reaction_index(
+        messages,
+        self_address=ctx.account.account_address,
+    )
+
+    print()
+    print("Reacting to:")
+    print(f"  {_chat_sender_label(dict(thread.original))}: {_chat_message_snippet(thread)}")
+
+    selection = _select_chat_reaction(reactions_by_signature.get(target_signature, ()))
+    if not selection:
+        warn("Reaction cancelled.")
+        return None
+
+    reaction, content_state = selection
+    message_text = build_reaction_message_text(reaction, content_state)
+    return _send_chat_message(ctx, message_text, chat_reference=target_signature)
 
 
 def _run_chat_edit_command(ctx: AppContext, messages: List[Dict[str, Any]]) -> Any | None:
@@ -964,6 +1049,25 @@ def run_chat_room(ctx: AppContext) -> None:
                 input("Press Enter to refresh chat...")
             except Exception as exc:
                 error("Failed to reply to chat message:")
+                if _is_node_unreachable_error(exc):
+                    _print_node_unreachable_hint(ctx)
+                else:
+                    print(pretty_exception(exc))
+                    _print_debug_traceback(ctx, exc)
+                pause()
+            continue
+        if command == "/react":
+            try:
+                result = _run_chat_reaction_command(ctx, messages)
+                if result is None:
+                    pause()
+                    continue
+                ok("Chat reaction submitted.")
+                if ctx.debug:
+                    print("Process response: " + str(result))
+                input("Press Enter to refresh chat...")
+            except Exception as exc:
+                error("Failed to react to chat message:")
                 if _is_node_unreachable_error(exc):
                     _print_node_unreachable_hint(ctx)
                 else:

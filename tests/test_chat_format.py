@@ -6,6 +6,7 @@ from unittest import TestCase
 
 from qortium_cli.chat_format import (
     ChatReaction,
+    build_reaction_message_text,
     build_message_reaction_index,
     build_message_threads,
     decode_chat_message,
@@ -107,6 +108,10 @@ class ChatFormatTests(TestCase):
             decoded.reaction,
             ChatReaction(content="\U0001f44d", content_state=False),
         )
+
+    def test_build_reaction_message_text_rejects_empty_reaction(self) -> None:
+        with self.assertRaises(ValueError):
+            build_reaction_message_text("", True)
 
     def test_decode_legacy_message_text_doc(self) -> None:
         doc = {

@@ -218,6 +218,21 @@ def build_chat_message_text(text: str, replied_to: str | None = None) -> str:
     )
 
 
+def build_reaction_message_text(content: str, content_state: bool) -> str:
+    normalized_content = _normalize_reaction_content(content)
+    if not normalized_content:
+        raise ValueError("Reaction content must be a short emoji string.")
+    return json.dumps(
+        {
+            "message": "",
+            "type": "reaction",
+            "content": normalized_content,
+            "contentState": bool(content_state),
+        },
+        separators=(",", ":"),
+    )
+
+
 def is_reaction_chat_message(message: Mapping[str, Any]) -> bool:
     return decode_chat_message(message).kind == "reaction"
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
-from qortium_cli.chat_format import build_chat_message_text
+from qortium_cli.chat_format import build_chat_message_text, build_reaction_message_text
 from qortium_cli.models import AccountSettings, AppContext, ChatSettings, EndpointSettings
 from qortium_cli.tools import (
     _editable_chat_threads,
@@ -14,6 +14,7 @@ from qortium_cli.tools import (
     _replyable_chat_threads,
     _replyable_chat_user_groups,
     _run_chat_edit_command,
+    _run_chat_reaction_command,
     _run_chat_reply_command,
     _send_chat_message,
 )
@@ -54,12 +55,42 @@ def message(**overrides):
     return row
 
 
+def reaction_message(
+    *,
+    sender: str,
+    timestamp: int,
+    chat_reference: str = "sig-target",
+    content: str = "\U0001f44d",
+    content_state: bool = True,
+):
+    return message(
+        chatReference=chat_reference,
+        data=base64_text(build_reaction_message_text(content, content_state)),
+        sender=sender,
+        signature=f"reaction-{sender}-{timestamp}",
+        timestamp=timestamp,
+    )
+
+
 class ChatCommandTests(TestCase):
     def test_build_chat_message_text_preserves_reply_target(self) -> None:
         payload = build_chat_message_text("updated", "sig-parent")
 
         self.assertEqual(json.loads(payload), {"message": "updated", "repliedTo": "sig-parent"})
         self.assertEqual(build_chat_message_text("plain"), "plain")
+
+    def test_build_reaction_message_text_builds_reaction_envelope(self) -> None:
+        payload = build_reaction_message_text("\U0001f44d", False)
+
+        self.assertEqual(
+            json.loads(payload),
+            {
+                "message": "",
+                "type": "reaction",
+                "content": "\U0001f44d",
+                "contentState": False,
+            },
+        )
 
     def test_normalize_chat_message_input_escapes_leading_slash(self) -> None:
         self.assertEqual(_normalize_chat_message_input("//help"), "/help")
@@ -168,6 +199,76 @@ class ChatCommandTests(TestCase):
         ):
             with redirect_stdout(io.StringIO()):
                 result = _run_chat_reply_command(ctx, [target])
+
+        self.assertIsNone(result)
+        send.assert_not_called()
+
+    def test_run_chat_reaction_command_adds_new_reaction(self) -> None:
+        ctx = make_context()
+        target = message(
+            sender="QotherAddress111111111111111111111111",
+            senderName="Other",
+            data=base64_text("target text"),
+            signature="sig-target",
+        )
+
+        with (
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1", "1"]),
+            patch("qortium_cli.tools._send_chat_message", return_value={"signature": "sig-reaction"}) as send,
+        ):
+            with redirect_stdout(io.StringIO()):
+                result = _run_chat_reaction_command(ctx, [target])
+
+        self.assertEqual(result, {"signature": "sig-reaction"})
+        send.assert_called_once()
+        _, message_text = send.call_args.args
+        self.assertEqual(send.call_args.kwargs["chat_reference"], "sig-target")
+        self.assertEqual(
+            json.loads(message_text),
+            {
+                "message": "",
+                "type": "reaction",
+                "content": "\U0001f44d",
+                "contentState": True,
+            },
+        )
+
+    def test_run_chat_reaction_command_removes_existing_self_reaction(self) -> None:
+        ctx = make_context()
+        target = message(
+            sender="QotherAddress111111111111111111111111",
+            senderName="Other",
+            data=base64_text("target text"),
+            signature="sig-target",
+        )
+        existing_reaction = reaction_message(
+            sender=ctx.account.account_address,
+            timestamp=20,
+            chat_reference="sig-target",
+        )
+
+        with (
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1", "1"]),
+            patch("qortium_cli.tools._send_chat_message", return_value={"signature": "sig-reaction"}) as send,
+        ):
+            with redirect_stdout(io.StringIO()):
+                result = _run_chat_reaction_command(ctx, [target, existing_reaction])
+
+        self.assertEqual(result, {"signature": "sig-reaction"})
+        _, message_text = send.call_args.args
+        self.assertEqual(send.call_args.kwargs["chat_reference"], "sig-target")
+        self.assertEqual(json.loads(message_text)["contentState"], False)
+
+    def test_run_chat_reaction_command_cancel_does_not_send(self) -> None:
+        ctx = make_context()
+        target = message(signature="sig-target", data=base64_text("target text"))
+
+        with (
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1", "0"]),
+            patch("qortium_cli.tools._send_chat_message") as send,
+        ):
+            with redirect_stdout(io.StringIO()):
+                result = _run_chat_reaction_command(ctx, [target])
 
         self.assertIsNone(result)
         send.assert_not_called()
