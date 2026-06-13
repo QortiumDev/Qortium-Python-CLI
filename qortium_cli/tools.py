@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 import requests
 
 from qortium_cli.chat_format import (
+    DEFAULT_REACTION_CATEGORIES,
     DEFAULT_REACTION_OPTIONS,
     MessageReactionSummary,
     MessageThread,
@@ -387,26 +388,126 @@ def _select_reactable_chat_thread(messages: List[Dict[str, Any]]) -> MessageThre
 def _select_chat_reaction(
     reactions: tuple[MessageReactionSummary, ...],
 ) -> tuple[str, bool] | None:
-    self_reactions = {
-        reaction.content for reaction in reactions if reaction.reacted_by_self
-    }
+    self_reactions = _self_reaction_contents(reactions)
+    if self_reactions:
+        action = _select_reaction_action(self_reactions)
+        if action is None:
+            return None
+    else:
+        action = "add"
 
-    print_section("Reaction")
-    for index, reaction in enumerate(DEFAULT_REACTION_OPTIONS, start=1):
-        action_label = "remove" if reaction in self_reactions else "add"
-        print_option(str(index), f"{reaction} ({action_label})")
+    if action == "remove":
+        reaction = _select_reaction_to_remove(self_reactions)
+        return (reaction, False) if reaction else None
+
+    reaction = _select_reaction_to_add(self_reactions)
+    return (reaction, True) if reaction else None
+
+
+def _self_reaction_contents(reactions: tuple[MessageReactionSummary, ...]) -> set[str]:
+    return {reaction.content for reaction in reactions if reaction.reacted_by_self}
+
+
+def _format_reaction_list(reactions: set[str]) -> str:
+    return " ".join(sorted(reactions, key=_reaction_sort_key))
+
+
+def _reaction_sort_key(reaction: str) -> tuple[int, str]:
+    try:
+        index = DEFAULT_REACTION_OPTIONS.index(reaction)
+    except ValueError:
+        index = len(DEFAULT_REACTION_OPTIONS)
+    return index, reaction
+
+
+def _select_reaction_action(self_reactions: set[str]) -> str | None:
+    print_section("Reaction Action")
+    print(f"Current reactions: {_format_reaction_list(self_reactions)}")
+    print_option("1", "Add reaction")
+    print_option("2", "Remove reaction")
     print_option("0", "Cancel")
 
     while True:
-        choice = read_menu_choice("Choose reaction: ")
+        choice = read_menu_choice("Choose reaction action: ")
+        if choice == "0":
+            return None
+        if choice == "1":
+            return "add"
+        if choice == "2":
+            return "remove"
+        warn("Unknown option.")
+
+
+def _reaction_categories_for_add(self_reactions: set[str]) -> list[tuple[str, tuple[str, ...]]]:
+    return [
+        (label, tuple(reaction for reaction in reactions if reaction not in self_reactions))
+        for label, reactions in DEFAULT_REACTION_CATEGORIES
+        if any(reaction not in self_reactions for reaction in reactions)
+    ]
+
+
+def _select_reaction_to_add(self_reactions: set[str]) -> str | None:
+    categories = _reaction_categories_for_add(self_reactions)
+    if not categories:
+        warn("No additional reactions are available.")
+        return None
+
+    while True:
+        print_section("Reaction Category")
+        for index, (label, reactions) in enumerate(categories, start=1):
+            print_option(str(index), f"{label} ({len(reactions)})")
+        print_option("0", "Cancel")
+
+        choice = read_menu_choice("Choose reaction category: ")
         if choice == "0":
             return None
         try:
             selected_index = int(choice) - 1
             if selected_index < 0:
                 raise IndexError
-            reaction = DEFAULT_REACTION_OPTIONS[selected_index]
-            return reaction, reaction not in self_reactions
+            label, category_reactions = categories[selected_index]
+        except (ValueError, IndexError):
+            warn("Unknown option.")
+            continue
+
+        print_section(label)
+        for index, reaction in enumerate(category_reactions, start=1):
+            print_option(str(index), reaction)
+        print_option("0", "Back")
+
+        while True:
+            choice = read_menu_choice("Choose reaction: ")
+            if choice == "0":
+                break
+            try:
+                selected_index = int(choice) - 1
+                if selected_index < 0:
+                    raise IndexError
+                return category_reactions[selected_index]
+            except (ValueError, IndexError):
+                warn("Unknown option.")
+
+
+def _select_reaction_to_remove(self_reactions: set[str]) -> str | None:
+    removable_reactions = tuple(sorted(self_reactions, key=_reaction_sort_key))
+    if not removable_reactions:
+        warn("No reactions to remove.")
+        return None
+
+    print_section("Remove Reaction")
+    for index, reaction in enumerate(removable_reactions, start=1):
+        print_option(str(index), reaction)
+    print_option("0", "Cancel")
+
+    while True:
+        choice = read_menu_choice("Choose reaction to remove: ")
+        if choice == "0":
+            return None
+        try:
+            selected_index = int(choice) - 1
+            if selected_index < 0:
+                raise IndexError
+            return removable_reactions[selected_index]
         except (ValueError, IndexError):
             warn("Unknown option.")
 

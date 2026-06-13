@@ -8,13 +8,75 @@ from typing import Any, Mapping
 from qortium_cli.crypto import b58decode, is_base58
 
 MAX_REACTION_CONTENT_LENGTH = 32
-DEFAULT_REACTION_OPTIONS = (
-    "\U0001f44d",
-    "\u2764\ufe0f",
-    "\U0001f602",
-    "\U0001f62e",
-    "\U0001f622",
-    "\U0001f64f",
+DEFAULT_REACTION_CATEGORIES = (
+    (
+        "Quick",
+        (
+            "\U0001f44d",
+            "\u2764\ufe0f",
+            "\U0001f602",
+            "\U0001f62e",
+            "\U0001f622",
+            "\U0001f64f",
+        ),
+    ),
+    (
+        "Faces",
+        (
+            "\U0001f600",
+            "\U0001f604",
+            "\U0001f60a",
+            "\U0001f60e",
+            "\U0001f914",
+            "\U0001f60d",
+            "\U0001f62d",
+            "\U0001f621",
+        ),
+    ),
+    (
+        "Hands",
+        (
+            "\U0001f44e",
+            "\U0001f44f",
+            "\U0001f64c",
+            "\U0001f4aa",
+            "\U0001f91d",
+            "\U0001f440",
+            "\U0001faf6",
+            "\U0001f91e",
+        ),
+    ),
+    (
+        "Hearts",
+        (
+            "\U0001f9e1",
+            "\U0001f49b",
+            "\U0001f49a",
+            "\U0001f499",
+            "\U0001f49c",
+            "\U0001f5a4",
+            "\U0001f90d",
+            "\U0001f494",
+        ),
+    ),
+    (
+        "Symbols",
+        (
+            "\u2705",
+            "\u274c",
+            "\U0001f4af",
+            "\u2b50",
+            "\U0001f525",
+            "\U0001f389",
+            "\U0001f680",
+            "\U0001f4a1",
+        ),
+    ),
+)
+DEFAULT_REACTION_OPTIONS = tuple(
+    reaction
+    for _, reactions in DEFAULT_REACTION_CATEGORIES
+    for reaction in reactions
 )
 DEFAULT_REACTION_ORDER = {
     reaction: index for index, reaction in enumerate(DEFAULT_REACTION_OPTIONS)

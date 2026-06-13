@@ -213,7 +213,7 @@ class ChatCommandTests(TestCase):
         )
 
         with (
-            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1", "1"]),
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1", "2", "1"]),
             patch("qortium_cli.tools._send_chat_message", return_value={"signature": "sig-reaction"}) as send,
         ):
             with redirect_stdout(io.StringIO()):
@@ -228,7 +228,7 @@ class ChatCommandTests(TestCase):
             {
                 "message": "",
                 "type": "reaction",
-                "content": "\U0001f44d",
+                "content": "\U0001f600",
                 "contentState": True,
             },
         )
@@ -248,7 +248,7 @@ class ChatCommandTests(TestCase):
         )
 
         with (
-            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1", "1"]),
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1", "2", "1"]),
             patch("qortium_cli.tools._send_chat_message", return_value={"signature": "sig-reaction"}) as send,
         ):
             with redirect_stdout(io.StringIO()):
@@ -258,6 +258,40 @@ class ChatCommandTests(TestCase):
         _, message_text = send.call_args.args
         self.assertEqual(send.call_args.kwargs["chat_reference"], "sig-target")
         self.assertEqual(json.loads(message_text)["contentState"], False)
+
+    def test_run_chat_reaction_command_can_add_when_self_reaction_exists(self) -> None:
+        ctx = make_context()
+        target = message(
+            sender="QotherAddress111111111111111111111111",
+            senderName="Other",
+            data=base64_text("target text"),
+            signature="sig-target",
+        )
+        existing_reaction = reaction_message(
+            sender=ctx.account.account_address,
+            timestamp=20,
+            chat_reference="sig-target",
+        )
+
+        with (
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "1", "1", "1", "1"]),
+            patch("qortium_cli.tools._send_chat_message", return_value={"signature": "sig-reaction"}) as send,
+        ):
+            with redirect_stdout(io.StringIO()):
+                result = _run_chat_reaction_command(ctx, [target, existing_reaction])
+
+        self.assertEqual(result, {"signature": "sig-reaction"})
+        _, message_text = send.call_args.args
+        self.assertEqual(send.call_args.kwargs["chat_reference"], "sig-target")
+        self.assertEqual(
+            json.loads(message_text),
+            {
+                "message": "",
+                "type": "reaction",
+                "content": "\u2764\ufe0f",
+                "contentState": True,
+            },
+        )
 
     def test_run_chat_reaction_command_cancel_does_not_send(self) -> None:
         ctx = make_context()
