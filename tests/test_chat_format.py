@@ -6,6 +6,7 @@ from unittest import TestCase
 
 from qortium_cli.chat_format import (
     ChatReaction,
+    build_message_reaction_index,
     build_message_threads,
     decode_chat_message,
 )
@@ -29,6 +30,32 @@ def message(**overrides):
     }
     row.update(overrides)
     return row
+
+
+def reaction_message(
+    *,
+    sender: str,
+    timestamp: int,
+    chat_reference: str = "sig-a",
+    content: str = "\U0001f44d",
+    content_state: bool = True,
+):
+    return message(
+        chatReference=chat_reference,
+        data=base64_text(
+            json.dumps(
+                {
+                    "message": "",
+                    "type": "reaction",
+                    "content": content,
+                    "contentState": content_state,
+                }
+            )
+        ),
+        sender=sender,
+        signature=f"reaction-{sender}-{timestamp}",
+        timestamp=timestamp,
+    )
 
 
 class ChatFormatTests(TestCase):
@@ -155,22 +182,7 @@ class ChatFormatTests(TestCase):
             signature="sig-reply",
             timestamp=20,
         )
-        reaction = message(
-            chatReference="sig-a",
-            data=base64_text(
-                json.dumps(
-                    {
-                        "message": "",
-                        "type": "reaction",
-                        "content": "\U0001f44d",
-                        "contentState": True,
-                    }
-                )
-            ),
-            sender="Qb",
-            signature="sig-reaction",
-            timestamp=30,
-        )
+        reaction = reaction_message(sender="Qb", timestamp=30)
 
         threads = build_message_threads([original, reply, reaction])
 
@@ -178,7 +190,30 @@ class ChatFormatTests(TestCase):
         self.assertEqual(threads[0].latest, original)
         self.assertEqual(threads[1].latest, reply)
 
-    def test_print_chat_timeline_folds_edits_and_hides_reactions(self) -> None:
+    def test_build_message_reaction_index_uses_latest_sender_state(self) -> None:
+        reactions = build_message_reaction_index(
+            [
+                reaction_message(sender="Qa", timestamp=20),
+                reaction_message(sender="Qb", timestamp=30),
+                reaction_message(
+                    sender="Qc",
+                    timestamp=40,
+                    content="\u2764\ufe0f",
+                ),
+                reaction_message(sender="Qa", timestamp=50, content_state=False),
+            ],
+            self_address="Qb",
+        )
+
+        self.assertEqual(len(reactions["sig-a"]), 2)
+        self.assertEqual(reactions["sig-a"][0].content, "\U0001f44d")
+        self.assertEqual(reactions["sig-a"][0].count, 1)
+        self.assertTrue(reactions["sig-a"][0].reacted_by_self)
+        self.assertEqual([reactor.sender for reactor in reactions["sig-a"][0].reactors], ["Qb"])
+        self.assertEqual(reactions["sig-a"][1].content, "\u2764\ufe0f")
+        self.assertEqual(reactions["sig-a"][1].count, 1)
+
+    def test_print_chat_timeline_folds_edits_and_shows_reactions(self) -> None:
         original = message(
             data=base64_text("original body"),
             senderName="Alice",
@@ -201,23 +236,7 @@ class ChatFormatTests(TestCase):
             signature="sig-reply",
             timestamp=1700000120000,
         )
-        reaction = message(
-            chatReference="sig-a",
-            data=base64_text(
-                json.dumps(
-                    {
-                        "message": "",
-                        "type": "reaction",
-                        "content": "\U0001f44d",
-                        "contentState": True,
-                    }
-                )
-            ),
-            sender="Qb",
-            senderName="Bob",
-            signature="sig-reaction",
-            timestamp=1700000130000,
-        )
+        reaction = reaction_message(sender="Qb", timestamp=1700000130000)
 
         output = io.StringIO()
         with redirect_stdout(output):
@@ -228,7 +247,27 @@ class ChatFormatTests(TestCase):
         self.assertIn("[edited]", text)
         self.assertIn("edited body", text)
         self.assertIn("reply to Alice: edited body", text)
+        self.assertIn("Reactions: \U0001f44d 1", text)
         self.assertIn("reply body", text)
         self.assertNotIn("original body", text)
         self.assertNotIn("sig-reaction", text)
-        self.assertNotIn("\U0001f44d", text)
+
+    def test_print_chat_timeline_shows_unavailable_for_missing_reply(self) -> None:
+        reply = message(
+            data=base64_text(
+                json.dumps({"message": "orphan reply", "repliedTo": "missing-signature"})
+            ),
+            sender="Qb",
+            senderName="Bob",
+            signature="sig-reply",
+            timestamp=1700000120000,
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _print_chat_timeline([reply])
+
+        text = output.getvalue()
+        self.assertIn("reply to: unavailable", text)
+        self.assertIn("orphan reply", text)
+        self.assertNotIn("missing-signature", text)

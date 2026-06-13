@@ -9,7 +9,13 @@ from typing import Any, Dict, List
 
 import requests
 
-from qortium_cli.chat_format import MessageThread, build_message_threads, decode_chat_message
+from qortium_cli.chat_format import (
+    MessageReactionSummary,
+    MessageThread,
+    build_message_reaction_index,
+    build_message_threads,
+    decode_chat_message,
+)
 from qortium_cli.constants import BOLD, CHAT_USER_COLORS, C_TEXT, QDN_SERVICES, RESET
 from qortium_cli.crypto import b58encode, to_base58_pubkey
 from qortium_cli.models import AppContext, ToolPlugin
@@ -192,13 +198,6 @@ def _chat_identity_display(message: Dict[str, Any]) -> str:
     return _colorize_chat_identity(sender_label, sender_address or sender_label)
 
 
-def _short_chat_signature(signature: str) -> str:
-    signature = signature.strip()
-    if len(signature) <= 16:
-        return signature
-    return f"{signature[:12]}..."
-
-
 def _chat_message_snippet(thread: MessageThread) -> str:
     decoded = decode_chat_message(thread.latest)
     for line in decoded.body.splitlines():
@@ -232,6 +231,12 @@ def _chat_reply_reference(thread: MessageThread, threads_by_signature: Dict[str,
         return ""
 
     return reference
+
+
+def _format_chat_reactions(reactions: tuple[MessageReactionSummary, ...]) -> str:
+    return "  Reactions: " + "  ".join(
+        f"{reaction.content} {reaction.count}" for reaction in reactions
+    )
 
 
 def _get_chat_fee_decimal(ctx: AppContext) -> Decimal:
@@ -603,6 +608,7 @@ def _print_chat_timeline(messages: List[Dict[str, Any]]) -> None:
         return
 
     threads = build_message_threads(messages)
+    reactions_by_signature = build_message_reaction_index(messages)
     if not threads:
         warn("No displayable chat messages found for this group.")
         return
@@ -645,13 +651,18 @@ def _print_chat_timeline(messages: List[Dict[str, Any]]) -> None:
             reply_sender = _chat_sender_label(dict(referenced_thread.original))
             print(f"  > reply to {reply_sender}: {_chat_message_snippet(referenced_thread)}")
         elif replied_to:
-            print(f"  > reply to {_short_chat_signature(replied_to)}")
+            print("  > reply to: unavailable")
 
         if decoded.body.strip():
             for line in decoded.body.splitlines():
                 print(f"  {line}")
         else:
             print("  [no text payload]")
+
+        signature = _chat_message_signature(thread)
+        reactions = reactions_by_signature.get(signature, ())
+        if reactions:
+            print(_format_chat_reactions(reactions))
 
         print()
 

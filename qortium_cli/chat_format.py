@@ -8,6 +8,17 @@ from typing import Any, Mapping
 from qortium_cli.crypto import b58decode, is_base58
 
 MAX_REACTION_CONTENT_LENGTH = 32
+DEFAULT_REACTION_OPTIONS = (
+    "\U0001f44d",
+    "\u2764\ufe0f",
+    "\U0001f602",
+    "\U0001f62e",
+    "\U0001f622",
+    "\U0001f64f",
+)
+DEFAULT_REACTION_ORDER = {
+    reaction: index for index, reaction in enumerate(DEFAULT_REACTION_OPTIONS)
+}
 
 
 @dataclass(frozen=True)
@@ -29,6 +40,21 @@ class MessageThread:
     latest: Mapping[str, Any]
     original: Mapping[str, Any]
     revisions: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class MessageReactionParticipant:
+    sender: str
+    timestamp: int
+
+
+@dataclass(frozen=True)
+class MessageReactionSummary:
+    content: str
+    count: int
+    latest_timestamp: int
+    reacted_by_self: bool
+    reactors: tuple[MessageReactionParticipant, ...]
 
 
 def _extract_doc_text(node: Any) -> str:
@@ -252,3 +278,65 @@ def build_message_threads(messages: list[Mapping[str, Any]]) -> list[MessageThre
         )
 
     return threads
+
+
+def build_message_reaction_index(
+    messages: list[Mapping[str, Any]],
+    self_address: str | None = None,
+) -> dict[str, tuple[MessageReactionSummary, ...]]:
+    reactions_by_reference: dict[str, dict[str, dict[str, MessageReactionParticipant]]] = {}
+
+    for message in sort_messages_by_timestamp(messages):
+        reference = _message_chat_reference(message)
+        sender = _message_sender(message)
+        if not reference or not sender:
+            continue
+
+        decoded = decode_chat_message(message)
+        if decoded.kind != "reaction" or not decoded.reaction:
+            continue
+
+        content_map = reactions_by_reference.setdefault(reference, {})
+        sender_map = content_map.setdefault(decoded.reaction.content, {})
+        if decoded.reaction.content_state:
+            sender_map[sender] = MessageReactionParticipant(
+                sender=sender,
+                timestamp=int(message.get("timestamp") or 0),
+            )
+        else:
+            sender_map.pop(sender, None)
+
+    reaction_index: dict[str, tuple[MessageReactionSummary, ...]] = {}
+    for signature, content_map in reactions_by_reference.items():
+        summaries: list[MessageReactionSummary] = []
+        for content, sender_map in content_map.items():
+            reactors = tuple(
+                sorted(
+                    sender_map.values(),
+                    key=lambda reaction: (-reaction.timestamp, reaction.sender),
+                )
+            )
+            if not reactors:
+                continue
+
+            latest_timestamp = max(reaction.timestamp for reaction in reactors)
+            summaries.append(
+                MessageReactionSummary(
+                    content=content,
+                    count=len(reactors),
+                    latest_timestamp=latest_timestamp,
+                    reacted_by_self=bool(self_address and self_address in sender_map),
+                    reactors=reactors,
+                )
+            )
+
+        summaries.sort(
+            key=lambda reaction: (
+                DEFAULT_REACTION_ORDER.get(reaction.content, len(DEFAULT_REACTION_OPTIONS)),
+                -reaction.latest_timestamp,
+                reaction.content,
+            )
+        )
+        reaction_index[signature] = tuple(summaries)
+
+    return reaction_index
