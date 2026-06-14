@@ -1,6 +1,4 @@
-from colorama import Fore, Style
-
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 APP_TITLE = f"Qortium CLI {APP_VERSION}"
 SETUP_TITLE = "Qortium Setup"
 
@@ -80,7 +78,6 @@ QDN_SERVICES = (
 B58_ALPHABET_BYTES = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 B58_ALPHABET_SET = set(B58_ALPHABET_BYTES.decode("ascii"))
 
-# Seed -> private key derivation constants (matches Hub/UI flow)
 STATIC_SALT = "4ghkVQExoneGqZqHTMMhhFfxXsVg2A75QeS1HCM5KAih"
 STATIC_BCRYPT_SALT = b"$2a$11$IxVE941tXVUD4cW0TNVm.O"
 KDF_THREADS = 16
@@ -98,41 +95,39 @@ QORTIUM_ASCII = """
       ?8P
 """
 
-RESET = Style.RESET_ALL
-BOLD = Style.BRIGHT
-DIM = Style.DIM
-
+# Raw ANSI color strings retained for legacy use in colorama-free mode
 C_CORE = "\x1b[38;2;178;124;255m"
 C_ACCENT = "\x1b[38;2;220;176;255m"
-C_TEXT = Fore.WHITE
-C_KEY = Fore.LIGHTYELLOW_EX + BOLD
-C_GOOD = Fore.LIGHTGREEN_EX + BOLD
-C_WARN = Fore.LIGHTYELLOW_EX + BOLD
-C_BAD = Fore.LIGHTRED_EX + BOLD
+C_TEXT = "\x1b[37m"
+C_KEY = "\x1b[93m\x1b[1m"
+C_GOOD = "\x1b[92m\x1b[1m"
+C_WARN = "\x1b[93m\x1b[1m"
+C_BAD = "\x1b[91m\x1b[1m"
+RESET = "\x1b[0m"
+BOLD = "\x1b[1m"
+DIM = "\x1b[2m"
 
-# Deterministic per-address chat colors.
 CHAT_USER_COLORS = [
-    "\x1b[38;2;255;122;122m",  # red
-    "\x1b[38;2;255;166;77m",   # orange
-    "\x1b[38;2;255;214;102m",  # amber
-    "\x1b[38;2;150;226;119m",  # lime
-    "\x1b[38;2;88;220;176m",   # mint
-    "\x1b[38;2;96;212;255m",   # cyan
-    "\x1b[38;2;104;170;255m",  # blue
-    "\x1b[38;2;138;132;255m",  # indigo
-    "\x1b[38;2;184;126;255m",  # violet
-    "\x1b[38;2;236;136;255m",  # magenta
-    "\x1b[38;2;255;146;206m",  # pink
-    "\x1b[38;2;182;192;208m",  # silver
+    "\x1b[38;2;255;122;122m",
+    "\x1b[38;2;255;166;77m",
+    "\x1b[38;2;255;214;102m",
+    "\x1b[38;2;150;226;119m",
+    "\x1b[38;2;88;220;176m",
+    "\x1b[38;2;96;212;255m",
+    "\x1b[38;2;104;170;255m",
+    "\x1b[38;2;138;132;255m",
+    "\x1b[38;2;184;126;255m",
+    "\x1b[38;2;236;136;255m",
+    "\x1b[38;2;255;146;206m",
+    "\x1b[38;2;182;192;208m",
 ]
 
-# Top-to-bottom gradient for logo lines.
 LOGO_GRADIENT = [
-    "\x1b[38;2;232;208;255m" + BOLD,
-    "\x1b[38;2;214;176;255m" + BOLD,
-    "\x1b[38;2;196;144;255m" + BOLD,
-    "\x1b[38;2;174;112;247m" + BOLD,
-    "\x1b[38;2;148;88;229m" + BOLD,
-    "\x1b[38;2;120;72;204m" + BOLD,
-    "\x1b[38;2;90;60;176m" + BOLD,
+    "\x1b[38;2;232;208;255m\x1b[1m",
+    "\x1b[38;2;214;176;255m\x1b[1m",
+    "\x1b[38;2;196;144;255m\x1b[1m",
+    "\x1b[38;2;174;112;247m\x1b[1m",
+    "\x1b[38;2;148;88;229m\x1b[1m",
+    "\x1b[38;2;120;72;204m\x1b[1m",
+    "\x1b[38;2;90;60;176m\x1b[1m",
 ]

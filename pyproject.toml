@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qortium-cli"
-version = "0.3.0"
+version = "0.4.0"
 description = "Qortium/Qortal terminal toolbox"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "bcrypt>=4.1.0",
-  "colorama>=0.4.6",
   "cryptography>=42.0.0",
   "requests>=2.31.0",
+  "rich>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -24,4 +24,12 @@ qortium-submit-tx = "qortium_cli.tx_submitter:main"
 qortium-build-tx = "qortium_cli.tx_builder:main"
 
 [tool.setuptools]
-packages = ["qortium_cli"]
+packages = [
+  "qortium_cli",
+  "qortium_cli.assets",
+  "qortium_cli.ui",
+  "qortium_cli.tools",
+]
+
+[tool.setuptools.package-data]
+"qortium_cli.assets" = ["*.txt"]

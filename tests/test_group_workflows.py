@@ -163,10 +163,14 @@ class GroupWorkflowTests(TestCase):
     def test_main_menu_uses_requested_numbering(self) -> None:
         tools = build_tool_plugins()
 
-        self.assertEqual([tool.key for tool in tools], ["1", "2", "3", "4", "5", "6", "8"])
+        self.assertEqual(
+            [tool.key for tool in tools],
+            ["1", "2", "3", "4", "5", "6", "7", "8", "B", "A", "H", "U"],
+        )
         self.assertEqual(
             [tool.label for tool in tools],
-            ["Node", "Chat", "Groups", "Register Name", "Wallet", "QDN Resources", "Help/Info"],
+            ["Node", "Chat", "Groups", "Names", "Wallet", "QDN",
+             "Minting", "TX Hub", "Backup Wallet", "API Explorer", "Help/Info", "Update"],
         )
 
     def test_accept_invite_submits_join_for_selected_group(self) -> None:
