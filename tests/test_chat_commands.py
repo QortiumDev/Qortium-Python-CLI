@@ -365,6 +365,7 @@ class ChatCommandTests(TestCase):
 
     def test_send_chat_message_includes_chat_reference_when_present(self) -> None:
         ctx = make_context()
+        ctx.chat.tx_group_id = 2
         session = MagicMock()
         manager = MagicMock()
         manager.__enter__.return_value = session
@@ -388,3 +389,5 @@ class ChatCommandTests(TestCase):
         payload = build_chat.call_args.args[1]
         self.assertEqual(payload["chatReference"], "sig-own")
         self.assertEqual(payload["data"], "encoded-message")
+        self.assertEqual(payload["txGroupId"], 2)
+        self.assertEqual(build_chat.call_args.kwargs["tx_group_id"], 2)

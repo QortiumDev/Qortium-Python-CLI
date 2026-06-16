@@ -1095,7 +1095,7 @@ def _send_chat_message(ctx: AppContext, message: str, *, chat_reference: str = "
         if chat_reference:
             payload["chatReference"] = chat_reference
 
-        unsigned_tx = build_chat(ctx, payload, session)
+        unsigned_tx = build_chat(ctx, payload, session, tx_group_id=tx_group_id)
 
         print("[2/4] Computing nonce (can take 10s-180s on lower-balance accounts)...", flush=True)
         try:
