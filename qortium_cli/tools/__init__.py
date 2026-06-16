@@ -189,8 +189,24 @@ def ensure_wallet_config_ready(ctx: AppContext) -> None:
 
 def _format_chat_timestamp(timestamp_ms: Any) -> str:
     try:
-        timestamp = int(timestamp_ms) / 1000.0
-        return datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        delta = datetime.datetime.now().timestamp() - int(timestamp_ms) / 1000.0
+        if delta < 60:
+            return "just now"
+        minutes = int(delta / 60)
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = int(delta / 3600)
+        if hours < 24:
+            return f"{hours}h ago"
+        days = int(delta / 86400)
+        return f"{days}d ago"
+    except Exception:
+        return "Unknown"
+
+
+def _format_absolute_timestamp(timestamp_ms: Any) -> str:
+    try:
+        return datetime.datetime.fromtimestamp(int(timestamp_ms) / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return "Unknown"
 
@@ -206,7 +222,7 @@ def _format_invite_expiry(expiry_ms: Any) -> str:
 
     if expiry <= 0:
         return "Never"
-    return _format_chat_timestamp(expiry)
+    return _format_absolute_timestamp(expiry)
 
 
 def _chat_message_signature(message: Dict[str, Any] | MessageThread) -> str:
