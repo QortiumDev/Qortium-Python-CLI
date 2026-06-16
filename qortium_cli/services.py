@@ -726,9 +726,20 @@ def delete_local_arbitrary_resource(
     return (response.text or "").strip().lower() == "true"
 
 
-def build_chat(ctx: AppContext, payload: Dict[str, Any], session: requests.Session) -> str:
+def build_chat(
+    ctx: AppContext,
+    payload: Dict[str, Any],
+    session: requests.Session,
+    *,
+    tx_group_id: int | None = None,
+) -> str:
+    params = None
+    if tx_group_id is not None:
+        params = {"txGroupId": int(tx_group_id)}
+
     response = session.post(
         build_api_url(ctx, "/chat"),
+        params=params,
         json=payload,
         timeout=ctx.endpoint.timeout_seconds,
     )
