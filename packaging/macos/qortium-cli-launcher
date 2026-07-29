@@ -1,0 +1,15 @@
+#!/bin/zsh
+set -eu
+
+CONTENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CLI_PATH="${CONTENTS_DIR}/Resources/qortium-cli-macos"
+
+/usr/bin/osascript - "$CLI_PATH" <<'APPLESCRIPT'
+on run argv
+    set cliPath to item 1 of argv
+    tell application "Terminal"
+        activate
+        do script quoted form of cliPath
+    end tell
+end run
+APPLESCRIPT

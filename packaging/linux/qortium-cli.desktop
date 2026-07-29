@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Qortium CLI
+Comment=Workflow-focused command console for Qortium
+Exec=qortium-cli-linux
+Icon=qortium-cli
+Terminal=true
+Categories=Network;Utility;

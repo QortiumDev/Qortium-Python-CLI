@@ -1,6 +1,7 @@
-# Qortium CLI 1.0.0
+# Qortium CLI 1.0.1
 
-The first production release of the workflow-focused Qortium command-line client.
+The workflow-focused Qortium command-line client, now distributed in native
+single-download formats for each supported platform.
 
 ## Highlights
 
@@ -15,10 +16,15 @@ The first production release of the workflow-focused Qortium command-line client
 
 ## Downloads
 
-- Windows x86-64: `qortium-cli-windows-x86_64.zip`
-- Linux x86-64: `qortium-cli-linux-x86_64.tar.gz`
-- macOS Apple Silicon: `qortium-cli-macos-arm64.tar.gz`
+- Windows x86-64: `qortium-cli-windows-x86_64.exe`
+- Linux x86-64: `qortium-cli-linux-x86_64.AppImage`
+- macOS Apple Silicon: `qortium-cli-macos-arm64.dmg`
 
-Every platform executable is built natively and must pass `--self-check` before the release is published. Verify downloads with `SHA256SUMS.txt`.
+Every platform executable is built natively and must pass `--self-check` before
+the release is published. The AppImage is executed directly, and the DMG is
+verified, mounted, and tested from inside the mounted app bundle. Verify
+downloads with `SHA256SUMS.txt`.
 
-Unsigned macOS builds may require approval in macOS Privacy & Security settings. Linux and macOS users can run the extracted executable directly; if an archive tool does not preserve its mode, run `chmod +x qortium-cli-*`.
+The macOS app is not yet Developer ID signed or notarized and may require
+approval in macOS Privacy & Security settings. Linux users should run
+`chmod +x qortium-cli-linux-x86_64.AppImage` once after downloading.

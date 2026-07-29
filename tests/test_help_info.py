@@ -26,16 +26,16 @@ def make_context() -> AppContext:
 
 
 class HelpInfoTests(TestCase):
-    def test_app_title_uses_v100(self) -> None:
-        self.assertEqual(APP_TITLE, "Qortium CLI 1.0.0")
+    def test_app_title_uses_v101(self) -> None:
+        self.assertEqual(APP_TITLE, "Qortium CLI 1.0.1")
 
     def test_help_info_shows_whats_new_entries(self) -> None:
         ctx = make_context()
 
-        # Navigate: Help menu → What's New → select v0.3.0 (now at index 3) → back → back
+        # Navigate: Help menu → What's New → select v0.3.0 (now at index 4) → back → back
         with (
             patch("qortium_cli.tools.print_banner"),
-            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "3", "0", "0"]),
+            patch("qortium_cli.tools.read_menu_choice", side_effect=["1", "4", "0", "0"]),
             patch("qortium_cli.tools.pause"),
         ):
             output = io.StringIO()
@@ -47,4 +47,5 @@ class HelpInfoTests(TestCase):
         self.assertIn("v0.3.0", text)
         self.assertIn("v0.4.0", text)
         self.assertIn("v1.0.0", text)
+        self.assertIn("v1.0.1", text)
         self.assertIn("Chat commands added: /reply, /edit, /react, /help, and /?.", text)

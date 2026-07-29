@@ -194,14 +194,15 @@ python -m pip install ".[build]"
 python scripts/build_binary.py
 ```
 
-Output names are platform-specific:
+Release downloads are platform-specific:
 
-- `qortium-cli-windows.exe`
-- `qortium-cli-macos`
-- `qortium-cli-linux`
+- `qortium-cli-windows-x86_64.exe`
+- `qortium-cli-linux-x86_64.AppImage`
+- `qortium-cli-macos-arm64.dmg`
 
 GitHub Actions tests the project and builds Windows x86-64, Linux x86-64, and
-Apple Silicon macOS artifacts.
+an Apple Silicon macOS app bundle. The AppImage and mounted DMG contents are
+runtime-tested before publication.
 Pushing a `v*` tag publishes them together in a GitHub release only after the
 test and build jobs succeed.
 

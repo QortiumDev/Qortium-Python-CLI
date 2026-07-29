@@ -90,6 +90,13 @@ ATOMIC_UNITS = Decimal("100000000")
 QDN_RESOURCE_PAGE_SIZE = 10
 WHATS_NEW_ENTRIES = (
     (
+        "v1.0.1",
+        (
+            "Releases now use a direct Windows EXE, Linux AppImage, and macOS app disk image.",
+            "Linux and macOS release containers are opened and runtime-tested before publication.",
+        ),
+    ),
+    (
         "v1.0.0",
         (
             "Production workflow redesign with responsive Node, Chat, Wallet, QDN, and Settings workspaces.",

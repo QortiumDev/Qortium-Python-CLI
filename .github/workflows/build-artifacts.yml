@@ -20,20 +20,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: qortium-cli-linux
+            artifact: qortium-cli-linux-appimage
             path: dist/qortium-cli-linux
-            binary: qortium-cli-linux
-            archive: dist/qortium-cli-linux-x86_64.tar.gz
+            release: dist/qortium-cli-linux-x86_64.AppImage
           - os: windows-latest
-            artifact: qortium-cli-windows
+            artifact: qortium-cli-windows-exe
             path: dist/qortium-cli-windows.exe
-            binary: qortium-cli-windows.exe
-            archive: dist/qortium-cli-windows-x86_64.zip
+            release: dist/qortium-cli-windows-x86_64.exe
           - os: macos-latest
-            artifact: qortium-cli-macos-arm64
+            artifact: qortium-cli-macos-dmg
             path: dist/qortium-cli-macos
-            binary: qortium-cli-macos
-            archive: dist/qortium-cli-macos-arm64.tar.gz
+            release: dist/qortium-cli-macos-arm64.dmg
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -56,20 +53,26 @@ jobs:
         env:
           QORTIUM_CLI_MOTION: "off"
 
-      - name: Package Linux or macOS executable
-        if: runner.os != 'Windows'
-        run: tar -czf "${{ matrix.archive }}" -C dist "${{ matrix.binary }}"
+      - name: Package and verify Linux AppImage
+        if: runner.os == 'Linux'
+        run: bash scripts/package_linux_appimage.sh "${{ matrix.path }}" "${{ matrix.release }}"
 
-      - name: Package Windows executable
+      - name: Prepare Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -LiteralPath "${{ matrix.path }}" -DestinationPath "${{ matrix.archive }}"
+        run: Copy-Item -LiteralPath "${{ matrix.path }}" -Destination "${{ matrix.release }}"
+
+      - name: Package and verify macOS app disk image
+        if: runner.os == 'macOS'
+        run: |
+          VERSION="$(python -c 'from qortium_cli.constants import APP_VERSION; print(APP_VERSION)')"
+          bash scripts/package_macos_dmg.sh "${{ matrix.path }}" "${{ matrix.release }}" "${VERSION}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.archive }}
+          path: ${{ matrix.release }}
           if-no-files-found: error
 
   publish:
