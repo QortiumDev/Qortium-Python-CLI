@@ -170,7 +170,7 @@ class GroupWorkflowTests(TestCase):
         self.assertEqual(
             [tool.label for tool in tools],
             ["Node", "Chat", "Groups", "Names", "Wallet", "QDN",
-             "Minting", "TX Hub", "Backup Wallet", "API Explorer", "Help/Info", "Update"],
+             "Minting", "Transaction Builder", "Backup Wallet", "API Explorer", "Help/Info", "Update"],
         )
 
     def test_accept_invite_submits_join_for_selected_group(self) -> None:

@@ -19,6 +19,7 @@ from qortium_cli.chat_format import (
     build_message_threads,
     build_reaction_message_text,
     decode_chat_message,
+    terminal_reaction,
 )
 from qortium_cli.constants import BOLD, CHAT_USER_COLORS, C_TEXT, QDN_SERVICES, RESET
 from qortium_cli.crypto import b58encode, to_base58_pubkey
@@ -270,7 +271,7 @@ def _chat_reply_reference(thread: MessageThread, threads_by_signature: Dict[str,
 
 def _format_chat_reactions(reactions: tuple[MessageReactionSummary, ...]) -> str:
     return "  Reactions: " + "  ".join(
-        f"{reaction.content} {reaction.count}" for reaction in reactions
+        f"{terminal_reaction(reaction.content)} {reaction.count}" for reaction in reactions
     )
 
 
@@ -440,7 +441,10 @@ def _self_reaction_contents(reactions: tuple[MessageReactionSummary, ...]) -> se
 
 
 def _format_reaction_list(reactions: set[str]) -> str:
-    return " ".join(sorted(reactions, key=_reaction_sort_key))
+    return " ".join(
+        terminal_reaction(reaction)
+        for reaction in sorted(reactions, key=_reaction_sort_key)
+    )
 
 
 def _reaction_sort_key(reaction: str) -> tuple[int, str]:
@@ -503,7 +507,7 @@ def _select_reaction_to_add(self_reactions: set[str]) -> str | None:
 
         print_section(label)
         for index, reaction in enumerate(category_reactions, start=1):
-            print_option(str(index), reaction)
+            print_option(str(index), terminal_reaction(reaction))
         print_option("0", "Back")
 
         while True:
@@ -527,7 +531,7 @@ def _select_reaction_to_remove(self_reactions: set[str]) -> str | None:
 
     print_section("Remove Reaction")
     for index, reaction in enumerate(removable_reactions, start=1):
-        print_option(str(index), reaction)
+        print_option(str(index), terminal_reaction(reaction))
     print_option("0", "Cancel")
 
     while True:
@@ -875,7 +879,7 @@ def _submit_arbitrary_publish_transaction(
                 f"{ctx.account.account_address}."
             )
 
-        print("\n[1/3] Building ARBITRARY APP transaction...", flush=True)
+        print(f"\n[1/3] Building ARBITRARY {service} transaction...", flush=True)
         fee_atomic = qort_to_atomic(current_fee)
         unsigned_tx = build_arbitrary_from_path(
             ctx,
@@ -942,7 +946,7 @@ def _submit_arbitrary_publish_transaction(
                 nonce_retried = False
                 warn(f"Retrying with recommended fee: {d8(current_fee)} QORT")
 
-                print("\n[1/3] Rebuilding ARBITRARY APP transaction...", flush=True)
+                print(f"\n[1/3] Rebuilding ARBITRARY {service} transaction...", flush=True)
                 unsigned_tx = build_arbitrary_from_path(
                     ctx,
                     session,
@@ -1732,19 +1736,15 @@ def check_balances(ctx: AppContext) -> None:
             except Exception:
                 continue
 
-            if asset_id not in info_cache and asset_id != 0:
+            if asset_id not in info_cache:
                 try:
                     info_cache[asset_id] = get_asset_info(ctx, session, asset_id=asset_id)
                 except Exception:
                     info_cache[asset_id] = {}
 
-            if asset_id == 0:
-                asset_name = "QORT"
-                divisible = True
-            else:
-                info = info_cache.get(asset_id, {})
-                asset_name = str(row.get("assetName") or info.get("name") or f"ASSET-{asset_id}")
-                divisible = bool(info.get("divisible", True))
+            info = info_cache.get(asset_id, {})
+            asset_name = str(row.get("assetName") or info.get("name") or f"ASSET-{asset_id}")
+            divisible = bool(info.get("divisible", True))
 
             formatted = _format_asset_balance(row.get("balance", 0), divisible)
             suffix = "" if divisible else " units"
@@ -1828,34 +1828,9 @@ def tool_node(ctx: AppContext) -> None:
 
 
 def tool_chat(ctx: AppContext) -> None:
-    while True:
-        print_banner(ctx.endpoint.base_url, f"Chat (Group {ctx.chat.tx_group_id})")
-        print_option("1", "Chat")
-        print_option("2", "Chat settings")
-        print_option("0", "Back")
-        choice = read_menu_choice("Choose an option: ")
+    from qortium_cli.features.chat import open_chat_workspace
 
-        try:
-            if choice == "0":
-                return
-            if choice == "1":
-                run_chat_room(ctx)
-                continue
-            if choice == "2":
-                tool_chat_settings(ctx)
-                continue
-        except Exception as exc:
-            error("Action failed:")
-            if _is_node_unreachable_error(exc):
-                _print_node_unreachable_hint(ctx)
-            else:
-                print(pretty_exception(exc))
-                _print_debug_traceback(ctx, exc)
-            pause()
-            continue
-
-        warn("Unknown option.")
-        pause()
+    open_chat_workspace(ctx)
 
 
 def tool_groups(ctx: AppContext) -> None:
@@ -2432,7 +2407,7 @@ def export_wallet_backup(ctx: AppContext) -> None:
         "private key."
     )
     print(
-        "Private-key wallets contain one QORT address and cannot derive additional "
+        "Private-key wallets contain one account address and cannot derive additional "
         "addresses."
     )
 

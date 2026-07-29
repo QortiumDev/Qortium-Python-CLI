@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qortium-cli"
-version = "0.4.0"
-description = "Qortium/Qortal terminal toolbox"
+version = "1.0.0"
+description = "A colorful, workflow-focused command-line client for Qortium"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,23 +13,21 @@ dependencies = [
   "cryptography>=42.0.0",
   "requests>=2.31.0",
   "rich>=13.0",
+  "terminaltexteffects>=0.15.0,<0.16",
+  "textual>=8.2.0,<9",
 ]
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.0"]
+dev = ["build>=1.2", "pyinstaller>=6.0"]
 
 [project.scripts]
 qortium-cli = "qortium_cli.entrypoint:main"
 qortium-submit-tx = "qortium_cli.tx_submitter:main"
 qortium-build-tx = "qortium_cli.tx_builder:main"
 
-[tool.setuptools]
-packages = [
-  "qortium_cli",
-  "qortium_cli.assets",
-  "qortium_cli.ui",
-  "qortium_cli.tools",
-]
+[tool.setuptools.packages.find]
+include = ["qortium_cli*"]
 
 [tool.setuptools.package-data]
 "qortium_cli.assets" = ["*.txt"]

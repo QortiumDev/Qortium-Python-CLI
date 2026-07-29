@@ -15,14 +15,8 @@ if ($InstallDeps) {
 }
 
 $null = Get-Command pyinstaller -ErrorAction Stop
-
-pyinstaller `
-  --noconfirm `
-  --clean `
-  --onefile `
-  --name qortium-cli `
-  main.py
+python scripts/build_binary.py
 
 Write-Host ""
 Write-Host "Build complete:"
-Write-Host "  $rootDir\dist\qortium-cli.exe"
+Write-Host "  $rootDir\dist\qortium-cli-windows.exe"

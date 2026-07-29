@@ -3,9 +3,8 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Iterator
 
-from rich.align import Align
 from rich.columns import Columns
 from rich.live import Live
 from rich.panel import Panel
@@ -13,6 +12,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from qortium_cli.ui.motion import MotionLevel, loading_effect, motion_level
 from qortium_cli.ui.theme import console
 
 _POW_SPINNER = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
@@ -26,11 +26,276 @@ _STEP_NUMS = ["①", "②", "③", "④"]
 # Generic spinner context manager
 # ---------------------------------------------------------------------------
 
+
+_LOADING_FRAME_LIMIT = 36
+_LOADING_FRAME_SECONDS = 0.055
+_LOADING_FRAME_STRIDES = {
+    "highlight": 3,
+    "decrypt": 8,
+    "wipe": 3,
+    "slide": 5,
+    "rain": 8,
+    "errorcorrect": 8,
+}
+
+
+def _current_screen_snapshot() -> str:
+    """Return the Rich-rendered content currently visible in the terminal."""
+
+    if not console.record:
+        return ""
+    try:
+        rendered = console.export_text(clear=False, styles=True)
+    except (AssertionError, OSError, RuntimeError):
+        return ""
+    lines = rendered.rstrip("\n").splitlines()
+    if not lines:
+        return ""
+    return "\n".join(lines[-max(6, console.height) :])
+
+
+def _screen_with_loading_footer(screen: str, width: int, height: int) -> str:
+    canvas_width = max(12, int(width))
+    canvas_height = max(6, int(height))
+    content = screen.rstrip("\n").splitlines()[: canvas_height - 1]
+    content.extend("" for _ in range((canvas_height - 1) - len(content)))
+    return "\n".join((*content, "LOADING...".center(canvas_width)))
+
+
+def _new_loading_effect(effect_name: str, text: str) -> object:
+    if effect_name == "decrypt":
+        from terminaltexteffects.effects.effect_decrypt import Decrypt
+
+        return Decrypt(text)
+    if effect_name == "wipe":
+        from terminaltexteffects.effects.effect_wipe import Wipe
+
+        return Wipe(text)
+    if effect_name == "slide":
+        from terminaltexteffects.effects.effect_slide import Slide
+
+        return Slide(text)
+    if effect_name == "rain":
+        from terminaltexteffects.effects.effect_rain import Rain
+
+        return Rain(text)
+    if effect_name == "errorcorrect":
+        from terminaltexteffects.effects.effect_errorcorrect import ErrorCorrect
+
+        return ErrorCorrect(text)
+
+    from terminaltexteffects.effects.effect_highlight import Highlight
+
+    return Highlight(text)
+
+
+def _iter_loading_frames(
+    screen: str,
+    width: int,
+    height: int,
+    effect_name: str,
+) -> Iterator[Text]:
+    """Yield TTE frames as they are generated to minimize first-frame latency."""
+
+    from terminaltexteffects.utils.graphics import Color, Gradient
+
+    effect = _new_loading_effect(
+        effect_name,
+        _screen_with_loading_footer(screen, width, height),
+    )
+    terminal_config = getattr(effect, "terminal_config")
+    terminal_config.canvas_width = max(12, int(width))
+    terminal_config.canvas_height = max(6, int(height))
+    terminal_config.anchor_canvas = "sw"
+    terminal_config.anchor_text = "nw"
+    terminal_config.frame_rate = 0
+
+    effect_config = getattr(effect, "effect_config")
+    gradient = (
+        Color("#29d3ff"),
+        Color("#8d6bff"),
+        Color("#f1a7ff"),
+    )
+    if hasattr(effect_config, "final_gradient_stops"):
+        effect_config.final_gradient_stops = gradient
+    if hasattr(effect_config, "final_gradient_steps"):
+        effect_config.final_gradient_steps = 10
+    if hasattr(effect_config, "final_gradient_direction"):
+        effect_config.final_gradient_direction = Gradient.Direction.HORIZONTAL
+    if hasattr(effect_config, "ciphertext_colors"):
+        effect_config.ciphertext_colors = gradient
+    if hasattr(effect_config, "typing_speed"):
+        effect_config.typing_speed = 12
+    if hasattr(effect_config, "highlight_brightness"):
+        effect_config.highlight_brightness = 2.0
+    if hasattr(effect_config, "highlight_width"):
+        effect_config.highlight_width = 5
+
+    stride = _LOADING_FRAME_STRIDES.get(effect_name, 4)
+    emitted = 0
+    for index, frame in enumerate(effect):
+        if index % stride == 0:
+            yield Text.from_ansi(frame.rstrip("\n"))
+            emitted += 1
+        if emitted >= _LOADING_FRAME_LIMIT:
+            return
+
+
+def _build_loading_frames(
+    screen: str,
+    width: int,
+    height: int,
+    effect_name: str,
+) -> tuple[Text, ...]:
+    """Collect one bounded loop for tests and non-live consumers."""
+
+    sampled = tuple(
+        _iter_loading_frames(screen, width, height, effect_name)
+    )
+    loop = (*sampled, *sampled[-2:0:-1]) if len(sampled) > 2 else sampled
+    return tuple(loop)
+
+
+class _TteLoadingIndicator:
+    def __init__(self, message: str, effect_name: str | None = None) -> None:
+        self.message = message
+        self.effect_name = effect_name or loading_effect()
+        self.screen = _current_screen_snapshot()
+        if not self.screen.strip():
+            raise RuntimeError("No current screen is available to animate.")
+        self._dimensions = (max(12, console.width), max(6, console.height))
+        self._initial_frame = Text.from_ansi(
+            _screen_with_loading_footer(self.screen, *self._dimensions)
+        )
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._live: Live | None = None
+        self._record_was_enabled = console.record
+
+    def start(self) -> None:
+        console.record = False
+        self._live = Live(
+            self._initial_frame,
+            console=console,
+            refresh_per_second=20,
+            transient=True,
+            screen=True,
+            vertical_overflow="crop",
+        )
+        self._live.__enter__()
+
+        def _animate() -> None:
+            while not self._stop.is_set():
+                try:
+                    dimensions = (
+                        max(12, console.width),
+                        max(6, console.height),
+                    )
+                    self._dimensions = dimensions
+                    forward_frames: list[Text] = []
+                    resized = False
+                    for frame in _iter_loading_frames(
+                        self.screen,
+                        *dimensions,
+                        self.effect_name,
+                    ):
+                        if self._stop.is_set():
+                            return
+                        current_dimensions = (
+                            max(12, console.width),
+                            max(6, console.height),
+                        )
+                        if current_dimensions != dimensions:
+                            resized = True
+                            break
+                        forward_frames.append(frame)
+                        if self._live is not None:
+                            self._live.update(frame, refresh=True)
+                        self._stop.wait(_LOADING_FRAME_SECONDS)
+                    if resized:
+                        continue
+                    if not forward_frames:
+                        self._stop.set()
+                        return
+                    for frame in reversed(forward_frames[1:-1]):
+                        if self._stop.is_set():
+                            return
+                        current_dimensions = (
+                            max(12, console.width),
+                            max(6, console.height),
+                        )
+                        if current_dimensions != dimensions:
+                            resized = True
+                            break
+                        if self._live is not None:
+                            self._live.update(frame, refresh=True)
+                        self._stop.wait(_LOADING_FRAME_SECONDS)
+                    if resized:
+                        continue
+                except (
+                    AttributeError,
+                    ImportError,
+                    IndexError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    UnicodeError,
+                    ValueError,
+                ):
+                    self._stop.set()
+                    return
+
+        self._thread = threading.Thread(
+            target=_animate,
+            name="qortium-tte-loading",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=0.5)
+            except RuntimeError:
+                pass
+        if self._live is not None:
+            try:
+                self._live.__exit__(None, None, None)
+            except (OSError, RuntimeError, UnicodeError, ValueError):
+                pass
+            self._live = None
+        console.record = self._record_was_enabled
+
+
 @contextmanager
 def spinner(message: str) -> Generator[None, None, None]:
-    from rich.status import Status
-    with console.status(f"[qort.accent]{message}[/]", spinner="dots", spinner_style="qort.heading"):
-        yield
+    loader: _TteLoadingIndicator | None = None
+    if motion_level(console.file) is MotionLevel.FULL:
+        try:
+            loader = _TteLoadingIndicator(message)
+            loader.start()
+        except (
+            AttributeError,
+            ImportError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ):
+            if loader is not None:
+                loader.stop()
+            loader = None
+
+    if loader is not None:
+        try:
+            yield
+        finally:
+            loader.stop()
+        return
+
+    yield
 
 
 # ---------------------------------------------------------------------------

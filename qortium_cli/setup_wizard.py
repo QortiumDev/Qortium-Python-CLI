@@ -26,7 +26,7 @@ from qortium_cli.ui import (
     read_menu_choice,
     warn,
 )
-from qortium_cli.validators import is_placeholder, normalize_node_url
+from qortium_cli.validators import is_placeholder, normalize_api_key, normalize_node_url
 from qortium_cli.wallet_backup import (
     default_wallet_backup_path,
     generate_new_wallet_backup,
@@ -190,14 +190,15 @@ def _prompt_required_api_key(ctx: AppContext, existing_api_key: str = "") -> str
         api_key = prompt_secret(
             "API key (X-API-KEY) [detected local Core key] (press Enter to use): "
         ).strip()
-        return api_key or suggestion.api_key
+        return normalize_api_key(api_key or suggestion.api_key)
 
     has_existing_api_key = bool(existing_api_key) and (not is_placeholder(existing_api_key))
     if has_existing_api_key:
         api_key = prompt_secret("API key (X-API-KEY) (press Enter to keep current): ").strip()
-        return api_key or existing_api_key
+        return normalize_api_key(api_key or existing_api_key)
 
-    return prompt_secret("API key (X-API-KEY): ").strip()
+    api_key = prompt_secret("API key (X-API-KEY): ").strip()
+    return normalize_api_key(api_key) if api_key else ""
 
 
 def configure_endpoint_url(ctx: AppContext) -> None:
@@ -259,6 +260,7 @@ def configure_api_key(ctx: AppContext) -> None:
         warn("API key unchanged.")
         return
 
+    api_key = normalize_api_key(api_key)
     ctx.account = replace(ctx.account, api_key=api_key)
     write_config_file(ctx.settings_dir, ctx.account)
     ok("API key updated. Wallet keys were not changed.")

@@ -19,6 +19,7 @@ from qortium_cli.chat_format import (
     build_message_threads,
     build_reaction_message_text,
     decode_chat_message,
+    terminal_reaction,
 )
 from qortium_cli.constants import BOLD, CHAT_USER_COLORS, C_TEXT, QDN_SERVICES, RESET
 from qortium_cli.crypto import b58encode, to_base58_pubkey
@@ -89,13 +90,24 @@ ATOMIC_UNITS = Decimal("100000000")
 QDN_RESOURCE_PAGE_SIZE = 10
 WHATS_NEW_ENTRIES = (
     (
+        "v1.0.0",
+        (
+            "Production workflow redesign with responsive Node, Chat, Wallet, QDN, and Settings workspaces.",
+            "Full-screen terminal chat supports public groups, encrypted direct messages, and private groups.",
+            "Chat replies, edits, and terminal-friendly reactions use Qortium-compatible message envelopes.",
+            "Wallet portfolio combines QORT and supported external wallets with balances, prices, and history.",
+            "Guided transaction forms use current Qortium Core endpoints and validation rules.",
+            "Native Windows, Linux, and Apple Silicon macOS builds are tested before release publication.",
+        ),
+    ),
+    (
         "v0.4.0",
         (
             "Full visual revamp: Rich-powered panels, spinners, progress bars, and color-coded output.",
             "ANSI startup animation plays on launch (place startup-animation.txt in assets/).",
             "Main menu shows a live right-panel with node stats, account info, and balance.",
             '/ (slash) launches fuzzy search across all menu commands from anywhere.',
-            "TX Hub: build, sign, and broadcast any transaction type with a guided form.",
+            "Transaction Builder: guided forms for supported transaction types.",
             "Minting Manager: self-share wizard, add/remove minting accounts, status dashboard.",
             "API Explorer: browse all node endpoints by category, auto-fill known params, see JSON.",
             "Transaction pipeline shows a 4-step live progress display with PoW elapsed timer.",
@@ -283,7 +295,7 @@ def _chat_reply_reference(thread: MessageThread, threads_by_signature: Dict[str,
 
 def _format_chat_reactions(reactions: tuple[MessageReactionSummary, ...]) -> str:
     return "  Reactions: " + "  ".join(
-        f"{reaction.content} {reaction.count}" for reaction in reactions
+        f"{terminal_reaction(reaction.content)} {reaction.count}" for reaction in reactions
     )
 
 
@@ -484,7 +496,10 @@ def _self_reaction_contents(reactions: tuple[MessageReactionSummary, ...]) -> se
 
 
 def _format_reaction_list(reactions: set[str]) -> str:
-    return " ".join(sorted(reactions, key=_reaction_sort_key))
+    return " ".join(
+        terminal_reaction(reaction)
+        for reaction in sorted(reactions, key=_reaction_sort_key)
+    )
 
 
 def _reaction_sort_key(reaction: str) -> tuple[int, str]:
@@ -547,7 +562,7 @@ def _select_reaction_to_add(self_reactions: set[str]) -> str | None:
 
         print_section(label)
         for index, reaction in enumerate(category_reactions, start=1):
-            print_option(str(index), reaction)
+            print_option(str(index), terminal_reaction(reaction))
         print_option("0", "Back")
 
         while True:
@@ -571,7 +586,7 @@ def _select_reaction_to_remove(self_reactions: set[str]) -> str | None:
 
     print_section("Remove Reaction")
     for index, reaction in enumerate(removable_reactions, start=1):
-        print_option(str(index), reaction)
+        print_option(str(index), terminal_reaction(reaction))
     print_option("0", "Cancel")
 
     while True:
@@ -1132,7 +1147,13 @@ def _print_chat_timeline(messages: List[Dict[str, Any]]) -> None:
         print()
 
 
-def _send_chat_message(ctx: AppContext, message: str, *, chat_reference: str = "") -> Any:
+def _send_chat_message(
+    ctx: AppContext,
+    message: str,
+    *,
+    chat_reference: str = "",
+    quiet: bool = False,
+) -> Any:
     ensure_wallet_config_ready(ctx)
 
     sender_pub = to_base58_pubkey(ctx.account.public_key)
@@ -1141,7 +1162,8 @@ def _send_chat_message(ctx: AppContext, message: str, *, chat_reference: str = "
     tx_group_id = int(ctx.chat.tx_group_id)
 
     with make_session(ctx, include_api_key=True) as session:
-        print("\\n[1/4] Building chat transaction...", flush=True)
+        if not quiet:
+            print("\\n[1/4] Building chat transaction...", flush=True)
         timestamp = get_timestamp(ctx, session)
         payload = {
             "timestamp": timestamp,
@@ -1157,7 +1179,11 @@ def _send_chat_message(ctx: AppContext, message: str, *, chat_reference: str = "
 
         unsigned_tx = build_chat(ctx, payload, session, tx_group_id=tx_group_id)
 
-        print("[2/4] Computing nonce (can take 10s-180s on lower-balance accounts)...", flush=True)
+        if not quiet:
+            print(
+                "[2/4] Computing nonce (can take 10s-180s on lower-balance accounts)...",
+                flush=True,
+            )
         try:
             unsigned_tx = compute_chat_nonce(ctx, unsigned_tx, session)
         except Exception as exc:
@@ -1168,10 +1194,12 @@ def _send_chat_message(ctx: AppContext, message: str, *, chat_reference: str = "
                 ) from exc
             raise
 
-        print("[3/4] Signing transaction...", flush=True)
+        if not quiet:
+            print("[3/4] Signing transaction...", flush=True)
         signed_tx = sign_tx(ctx, unsigned_tx, session)
 
-        print("[4/4] Processing transaction...", flush=True)
+        if not quiet:
+            print("[4/4] Processing transaction...", flush=True)
         result = process_tx(ctx, signed_tx, session)
 
     return result
@@ -1776,19 +1804,15 @@ def check_balances(ctx: AppContext) -> None:
             except Exception:
                 continue
 
-            if asset_id not in info_cache and asset_id != 0:
+            if asset_id not in info_cache:
                 try:
                     info_cache[asset_id] = get_asset_info(ctx, session, asset_id=asset_id)
                 except Exception:
                     info_cache[asset_id] = {}
 
-            if asset_id == 0:
-                asset_name = "QORT"
-                divisible = True
-            else:
-                info = info_cache.get(asset_id, {})
-                asset_name = str(row.get("assetName") or info.get("name") or f"ASSET-{asset_id}")
-                divisible = bool(info.get("divisible", True))
+            info = info_cache.get(asset_id, {})
+            asset_name = str(row.get("assetName") or info.get("name") or f"ASSET-{asset_id}")
+            divisible = bool(info.get("divisible", True))
 
             formatted = _format_asset_balance(row.get("balance", 0), divisible)
             suffix = "" if divisible else " units"
@@ -1872,34 +1896,9 @@ def tool_node(ctx: AppContext) -> None:
 
 
 def tool_chat(ctx: AppContext) -> None:
-    while True:
-        print_banner(ctx.endpoint.base_url, f"Chat (Group {ctx.chat.tx_group_id})")
-        print_option("1", "Chat")
-        print_option("2", "Chat settings")
-        print_option("0", "Back")
-        choice = read_menu_choice("Choose an option: ")
+    from qortium_cli.features.chat import open_chat_workspace
 
-        try:
-            if choice == "0":
-                return
-            if choice == "1":
-                run_chat_room(ctx)
-                continue
-            if choice == "2":
-                tool_chat_settings(ctx)
-                continue
-        except Exception as exc:
-            error("Action failed:")
-            if _is_node_unreachable_error(exc):
-                _print_node_unreachable_hint(ctx)
-            else:
-                print(pretty_exception(exc))
-                _print_debug_traceback(ctx, exc)
-            pause()
-            continue
-
-        warn("Unknown option.")
-        pause()
+    open_chat_workspace(ctx)
 
 
 def tool_groups(ctx: AppContext) -> None:
@@ -2476,7 +2475,7 @@ def export_wallet_backup(ctx: AppContext) -> None:
         "private key."
     )
     print(
-        "Private-key wallets contain one QORT address and cannot derive additional "
+        "Private-key wallets contain one account address and cannot derive additional "
         "addresses."
     )
 
@@ -2649,7 +2648,7 @@ def build_tool_plugins() -> List[ToolPlugin]:
     tools.extend([
         ToolPlugin("6", "QDN", "Publish APPs or delete arbitrary resources", tool_qdn_resources),
         ToolPlugin("7", "Minting", "Self-share setup and minting accounts", tool_minting),
-        ToolPlugin("8", "TX Hub", "Build and sign any transaction type", tool_tx_hub),
+        ToolPlugin("8", "Transaction Builder", "Guided forms for supported transaction types", tool_tx_hub),
         ToolPlugin("B", "Backup Wallet", "Save Qortium Home private-key backup", export_wallet_backup),
         ToolPlugin("A", "API Explorer", "Browse and call any node endpoint", tool_api_explorer),
         ToolPlugin("H", "Help/Info", "Documentation and changelog", tool_help_info),

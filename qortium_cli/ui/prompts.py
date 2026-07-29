@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+from getpass import getpass
 
+import os
 import sys
 
 from qortium_cli.constants import C_ACCENT, C_BAD, C_GOOD, C_TEXT, C_WARN, DIM, RESET
@@ -60,8 +62,78 @@ def prompt_str(prompt: str, default: str = "") -> str:
     return value if value else default
 
 
+def _windows_clipboard_text() -> str:
+    """Read Unicode clipboard text without adding a runtime dependency."""
+
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.GetClipboardData.restype = ctypes.c_void_p
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+
+        if not user32.OpenClipboard(None):
+            return ""
+        try:
+            handle = user32.GetClipboardData(13)  # CF_UNICODETEXT
+            if not handle:
+                return ""
+            pointer = kernel32.GlobalLock(handle)
+            if not pointer:
+                return ""
+            try:
+                return ctypes.wstring_at(pointer)
+            finally:
+                kernel32.GlobalUnlock(handle)
+        finally:
+            user32.CloseClipboard()
+    except (AttributeError, OSError, TypeError, ValueError):
+        return ""
+
+
+def _windows_secret_input(prompt: str) -> str:
+    """Hidden Windows input with explicit Ctrl+V clipboard support."""
+
+    import msvcrt
+
+    _p(prompt)
+    characters: list[str] = []
+    while True:
+        char = msvcrt.getwch()
+        if char in {"\r", "\n"}:
+            _p("\n")
+            return "".join(characters).strip()
+        if char == "\x03":
+            _p("\n")
+            raise KeyboardInterrupt
+        if char == "\b":
+            if characters:
+                characters.pop()
+            continue
+        if char == "\x16":
+            pasted = _windows_clipboard_text().strip()
+            characters.extend(
+                value
+                for value in pasted
+                if ord(value) >= 32 and ord(value) != 127
+            )
+            continue
+        if char in {"\x00", "\xe0"}:
+            msvcrt.getwch()
+            continue
+        if ord(char) < 32 or ord(char) == 127:
+            continue
+        characters.append(char)
+
+
 def prompt_secret(prompt: str) -> str:
-    return prompt_str(prompt, "").strip()
+    try:
+        if os.name == "nt" and getattr(sys.stdin, "isatty", lambda: False)():
+            return _windows_secret_input(prompt)
+        return getpass(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
 
 
 def prompt_int(prompt: str, default: int, minimum: int = 0) -> int:

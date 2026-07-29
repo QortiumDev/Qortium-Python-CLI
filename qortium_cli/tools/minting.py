@@ -7,7 +7,7 @@ from qortium_cli.ui import (
     ok,
     pause,
     print_banner,
-    prompt_str,
+    prompt_secret,
     prompt_yes_no,
     read_menu_choice,
     warn,
@@ -33,6 +33,11 @@ def _ensure_ready(ctx: AppContext) -> None:
         raise RuntimeError("API key is missing. Run reconfigure first.")
     if is_placeholder(ctx.account.private_key):
         raise RuntimeError("Private key is missing. Run reconfigure first.")
+
+
+def _ensure_api_key(ctx: AppContext) -> None:
+    if is_placeholder(ctx.account.api_key):
+        raise RuntimeError("API key is missing. Run reconfigure first.")
 
 
 def _tool_minting_status(ctx: AppContext) -> None:
@@ -66,7 +71,7 @@ def _tool_minting_accounts(ctx: AppContext) -> None:
     from qortium_cli.ui.widgets import data_table
 
     tool_header("Loaded Minting Accounts", "◈")
-    _ensure_ready(ctx)
+    _ensure_api_key(ctx)
     try:
         with spinner("Fetching minting accounts..."):
             with make_session(ctx, include_api_key=True) as session:
@@ -97,8 +102,8 @@ def _tool_minting_add_key(ctx: AppContext) -> None:
     from qortium_cli.services import make_session, request_text_or_json
 
     tool_header("Add Minting Key", "◈")
-    _ensure_ready(ctx)
-    minting_key = prompt_str("Minting private key (Base58): ").strip()
+    _ensure_api_key(ctx)
+    minting_key = prompt_secret("Minting private key (Base58): ").strip()
     if not minting_key:
         warn("Cancelled.")
         return
@@ -256,3 +261,21 @@ def tool_minting(ctx: AppContext) -> None:
         else:
             warn("Unknown option.")
             pause()
+
+
+def view_minting_accounts(ctx: AppContext) -> None:
+    """Public workflow used by the combined Node & Minting workspace."""
+
+    _tool_minting_accounts(ctx)
+
+
+def setup_self_share(ctx: AppContext) -> None:
+    """Public workflow used by the combined Node & Minting workspace."""
+
+    _tool_minting_setup_self_share(ctx)
+
+
+def add_minting_key(ctx: AppContext) -> None:
+    """Public workflow used by the combined Node & Minting workspace."""
+
+    _tool_minting_add_key(ctx)

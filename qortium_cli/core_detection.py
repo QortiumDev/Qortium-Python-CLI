@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+from qortium_cli.validators import normalize_api_key
+
 
 API_KEY_FILE = "apikey.txt"
 MAINNET_API_PORT = 14891
@@ -111,6 +113,11 @@ def _read_api_key(api_key_directory: Path) -> tuple[str, Path] | None:
     if not api_key:
         return None
 
+    try:
+        api_key = normalize_api_key(api_key)
+    except ValueError:
+        return None
+
     return api_key, api_key_path.resolve()
 
 
@@ -149,7 +156,13 @@ def _read_process_args(proc_dir: Path) -> list[str]:
 
 
 def _read_process_cwd(proc_dir: Path) -> Path:
-    return Path(os.readlink(proc_dir / "cwd")).resolve()
+    cwd_entry = proc_dir / "cwd"
+    try:
+        return Path(os.readlink(cwd_entry)).resolve()
+    except OSError:
+        # Synthetic /proc trees used by cross-platform tests cannot always
+        # create directory symlinks (notably Windows without Developer Mode).
+        return Path(cwd_entry.read_text(encoding="utf-8").strip()).resolve()
 
 
 def _dedupe_candidates(candidates: list[LocalCoreApiKey]) -> list[LocalCoreApiKey]:
@@ -157,6 +170,60 @@ def _dedupe_candidates(candidates: list[LocalCoreApiKey]) -> list[LocalCoreApiKe
     for candidate in candidates:
         deduped[candidate.api_key_path] = candidate
     return list(deduped.values())
+
+
+def _managed_qortium_candidates(target_port: int) -> list[LocalCoreApiKey]:
+    """Discover keys from the managed Windows Qortium Core installation."""
+
+    appdata = str(os.environ.get("APPDATA", "") or "").strip()
+    if not appdata:
+        return []
+
+    managed_root = Path(appdata).resolve() / "qortium-core"
+    current = _read_json_file(managed_root / "current.json")
+    raw_runtime_path = current.get("runtimePath")
+    runtime_path = (
+        Path(raw_runtime_path).resolve()
+        if isinstance(raw_runtime_path, str) and raw_runtime_path.strip()
+        else managed_root / "runtime"
+    )
+    raw_jar_path = current.get("jarPath")
+    jar_path = (
+        Path(raw_jar_path).resolve()
+        if isinstance(raw_jar_path, str) and raw_jar_path.strip()
+        else managed_root / "install" / "qortium.jar"
+    )
+
+    try:
+        settings_paths = list(runtime_path.glob("settings*.json"))
+    except OSError:
+        return []
+
+    candidates: list[LocalCoreApiKey] = []
+    for raw_settings_path in settings_paths:
+        try:
+            settings_path = _effective_settings_path(raw_settings_path, runtime_path)
+            settings = _read_json_file(settings_path)
+            if _settings_api_port(settings) != target_port:
+                continue
+            api_key_directory = _settings_api_key_directory(settings_path, runtime_path)
+            api_key = _read_api_key(api_key_directory)
+            if api_key is None:
+                continue
+            candidates.append(
+                LocalCoreApiKey(
+                    api_key=api_key[0],
+                    api_key_path=api_key[1],
+                    api_key_directory=api_key_directory.resolve(),
+                    cwd=runtime_path.resolve(),
+                    jar_path=jar_path,
+                    pid=0,
+                    settings_path=settings_path,
+                )
+            )
+        except Exception:
+            continue
+    return _dedupe_candidates(candidates)
 
 
 def detect_local_core_api_key(
@@ -210,6 +277,13 @@ def detect_local_core_api_key(
         return matched_candidates[0]
     if matched_candidates:
         return None
+
+    if proc_root == Path("/proc"):
+        managed_candidates = _managed_qortium_candidates(target_port)
+        if len(managed_candidates) == 1:
+            return managed_candidates[0]
+        if managed_candidates:
+            return None
 
     fallback_candidates = _dedupe_candidates(fallback_candidates)
     return fallback_candidates[0] if len(fallback_candidates) == 1 else None

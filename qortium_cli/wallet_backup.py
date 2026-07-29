@@ -109,8 +109,16 @@ def normalize_wallet_file_path(path: str | Path) -> Path:
             raw_path = _strip_wrapping_quotes(raw_path)
     else:
         raw_path = _strip_wrapping_quotes(raw_path)
+        # A POSIX path dragged from WSL/Git Bash can contain shell-escaped
+        # spaces. On Windows, pathlib would otherwise treat the backslash as a
+        # directory separator.
+        if raw_path.startswith("/"):
+            raw_path = raw_path.replace("\\ ", " ")
 
-    return Path(raw_path).expanduser().resolve()
+    # Do not resolve here. Apart from requiring the path to exist on some
+    # platforms, resolving a pasted POSIX path on Windows silently prefixes
+    # the current drive and changes what the user entered.
+    return Path(raw_path).expanduser()
 
 
 def decrypt_wallet_payload(wallet: Dict[str, Any], password: str) -> bytes:

@@ -35,7 +35,7 @@ from qortium_cli.validators import is_placeholder
 ENDPOINT_CATALOG: Dict[str, List[Tuple]] = {
     "Account": [
         ("GET", "/addresses/{address}", "Account data", [("address", "Qortium address", "address")], False, False),
-        ("GET", "/addresses/balance/{address}", "QORT balance", [("address", "Qortium address", "address")], False, False),
+        ("GET", "/addresses/balance/{address}", "Qortium account balance response", [("address", "Qortium address", "address")], False, False),
         ("GET", "/addresses/convert/{pubkey}", "Pubkey → Address", [("pubkey", "Base58 public key", "pubkey")], False, False),
         ("GET", "/addresses/lastreference/{address}", "Last transaction reference", [("address", "Qortium address", "address")], True, False),
         ("GET", "/assets/balances?addresses={address}&includeZeroBalances=true", "All asset balances", [("address", "Qortium address", "address")], True, False),
@@ -79,7 +79,7 @@ ENDPOINT_CATALOG: Dict[str, List[Tuple]] = {
         ("GET", "/admin/info", "Node build info", [], True, False),
         ("GET", "/admin/mintingaccounts", "Loaded minting accounts", [], True, False),
         ("GET", "/peers/summary", "Peer summary", [], True, False),
-        ("GET", "/stats/supply/circulating", "Circulating QORT supply", [], False, False),
+        ("GET", "/stats/supply/circulating", "Core circulating-supply response", [], False, False),
     ],
 }
 

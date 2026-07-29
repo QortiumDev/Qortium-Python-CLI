@@ -10,6 +10,7 @@ from qortium_cli.chat_format import (
     build_message_reaction_index,
     build_message_threads,
     decode_chat_message,
+    terminal_reaction,
 )
 from qortium_cli.tools import _print_chat_timeline
 
@@ -60,6 +61,13 @@ def reaction_message(
 
 
 class ChatFormatTests(TestCase):
+    def test_terminal_reaction_uses_readable_ascii_labels(self) -> None:
+        self.assertEqual(terminal_reaction("\U0001f60a"), ":-)")
+        self.assertEqual(terminal_reaction("\U0001f44d"), "+1")
+        self.assertEqual(terminal_reaction("\u2764\ufe0f"), "<3")
+        self.assertEqual(terminal_reaction("custom"), "custom")
+        self.assertEqual(terminal_reaction("\U0001f984"), "[U+1F984]")
+
     def test_decode_plain_base64_text(self) -> None:
         decoded = decode_chat_message(message(data=base64_text("plain text")))
 
@@ -252,7 +260,7 @@ class ChatFormatTests(TestCase):
         self.assertIn("[edited]", text)
         self.assertIn("edited body", text)
         self.assertIn("reply to Alice: edited body", text)
-        self.assertIn("Reactions: \U0001f44d 1", text)
+        self.assertIn("Reactions: +1 1", text)
         self.assertIn("reply body", text)
         self.assertNotIn("original body", text)
         self.assertNotIn("sig-reaction", text)

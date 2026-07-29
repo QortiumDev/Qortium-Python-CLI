@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 from qortium_cli.constants import DEFAULT_BASE_URL, DEFAULT_TIMEOUT_SECONDS
 from qortium_cli.models import AccountSettings, ChatSettings, EndpointSettings
-from qortium_cli.validators import normalize_node_url
+from qortium_cli.validators import is_placeholder, normalize_api_key, normalize_node_url
 
 
 def endpoint_file_path(settings_dir: Path) -> Path:
@@ -117,12 +117,15 @@ def write_endpoint_file(settings_dir: Path, settings: EndpointSettings) -> None:
 
 
 def write_config_file(settings_dir: Path, account: AccountSettings) -> None:
+    api_key = str(account.api_key or "").strip()
+    if not is_placeholder(api_key):
+        api_key = normalize_api_key(api_key)
     content = (
         f"NAME = {json.dumps(account.name)}\n"
         f"ACCOUNT_ADDRESS = {json.dumps(account.account_address)}\n"
         f"PUBLIC_KEY = {json.dumps(account.public_key)}\n"
         f"PRIVATE_KEY = {json.dumps(account.private_key)}\n"
-        f"API_KEY = {json.dumps(account.api_key)}\n"
+        f"API_KEY = {json.dumps(api_key)}\n"
     )
     settings_dir.mkdir(parents=True, exist_ok=True)
     config_file_path(settings_dir).write_text(content, encoding="utf-8")

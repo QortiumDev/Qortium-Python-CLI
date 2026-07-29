@@ -1,14 +1,16 @@
-"""Universal TX Hub — build, sign, and broadcast any transaction type."""
+"""Guided builder for the transaction types supported by this CLI."""
+
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List
+from typing import Any
+
+import requests
 
 from qortium_cli.models import AppContext
 from qortium_cli.ui import (
-    ok,
     pause,
-    print_banner,
     prompt_decimal,
     prompt_int,
     prompt_str,
@@ -16,458 +18,478 @@ from qortium_cli.ui import (
     read_menu_choice,
     warn,
 )
-from qortium_cli.ui.banner import tool_header
+from qortium_cli.ui.menu import MenuOption, render_header, render_options
 from qortium_cli.ui.theme import console
-from qortium_cli.ui.widgets import (
-    TxPipeline,
-    error_panel,
-    json_panel,
-    ok_panel,
-    spinner,
-    warn_panel,
-)
+from qortium_cli.ui.widgets import TxPipeline, error_panel, json_panel, ok_panel
 from qortium_cli.utils import d8, pretty_exception
 from qortium_cli.validators import is_placeholder, looks_like_qortal_address
 
-# ---------------------------------------------------------------------------
-# Transaction catalog
-# ---------------------------------------------------------------------------
 
-TX_CATALOG: List[Dict[str, Any]] = [
-    # Groups
-    {
-        "key": "G1",
-        "label": "JOIN_GROUP",
-        "category": "Groups",
-        "path": "/groups/join",
-        "needs_pow": True,
-        "fields": [
-            {"name": "joinerPublicKey", "label": "Joiner Public Key", "auto": "pubkey"},
-            {"name": "groupId", "label": "Group ID", "type": "int", "min": 1},
-        ],
-    },
-    {
-        "key": "G2",
-        "label": "LEAVE_GROUP",
-        "category": "Groups",
-        "path": "/groups/leave",
-        "needs_pow": True,
-        "fields": [
-            {"name": "leaverPublicKey", "label": "Leaver Public Key", "auto": "pubkey"},
-            {"name": "groupId", "label": "Group ID", "type": "int", "min": 1},
-        ],
-    },
-    {
-        "key": "G3",
-        "label": "GROUP_INVITE",
-        "category": "Groups",
-        "path": "/groups/invite",
-        "needs_pow": True,
-        "fields": [
-            {"name": "adminPublicKey", "label": "Admin Public Key", "auto": "pubkey"},
-            {"name": "groupId", "label": "Group ID", "type": "int", "min": 1},
-            {"name": "invitee", "label": "Invitee Address", "type": "address"},
-            {"name": "timeToLive", "label": "Time to Live (0=never)", "type": "int", "default": 0, "min": 0},
-        ],
-    },
-    {
-        "key": "G4",
-        "label": "CREATE_GROUP",
-        "category": "Groups",
-        "path": "/groups/create",
-        "needs_pow": True,
-        "fields": [
-            {"name": "creatorPublicKey", "label": "Creator Public Key", "auto": "pubkey"},
-            {"name": "groupName", "label": "Group Name"},
-            {"name": "description", "label": "Description"},
-            {"name": "isOpen", "label": "Open Group?", "type": "bool", "default": True},
-            {"name": "approvalThreshold", "label": "Approval Threshold (NONE/ONE/PCT20/...)", "default": "NONE"},
-            {"name": "minimumBlockDelay", "label": "Min Block Delay", "type": "int", "default": 0, "min": 0},
-            {"name": "maximumBlockDelay", "label": "Max Block Delay", "type": "int", "default": 1440, "min": 1},
-        ],
-    },
-    # Names
-    {
-        "key": "N1",
-        "label": "REGISTER_NAME",
-        "category": "Names",
-        "path": "/names/register",
-        "needs_pow": True,
-        "fields": [
-            {"name": "registrantPublicKey", "label": "Registrant Public Key", "auto": "pubkey"},
-            {"name": "name", "label": "Name"},
-            {"name": "data", "label": "Name Data", "default": "{}"},
-        ],
-    },
-    {
-        "key": "N2",
-        "label": "UPDATE_NAME",
-        "category": "Names",
-        "path": "/names/update",
-        "needs_pow": True,
-        "fields": [
-            {"name": "ownerPublicKey", "label": "Owner Public Key", "auto": "pubkey"},
-            {"name": "name", "label": "Existing Name"},
-            {"name": "newName", "label": "New Name (blank = keep)"},
-            {"name": "newData", "label": "New Data (blank = keep)"},
-        ],
-    },
-    {
-        "key": "N3",
-        "label": "SELL_NAME",
-        "category": "Names",
-        "path": "/names/sell",
-        "needs_pow": True,
-        "fields": [
-            {"name": "ownerPublicKey", "label": "Owner Public Key", "auto": "pubkey"},
-            {"name": "name", "label": "Name"},
-            {"name": "salePrice", "label": "Sale Price (QORT)", "type": "decimal", "default": Decimal("0")},
-        ],
-    },
-    {
-        "key": "N4",
-        "label": "CANCEL_SELL_NAME",
-        "category": "Names",
-        "path": "/names/cancelSell",
-        "needs_pow": True,
-        "fields": [
-            {"name": "ownerPublicKey", "label": "Owner Public Key", "auto": "pubkey"},
-            {"name": "name", "label": "Name"},
-        ],
-    },
-    {
-        "key": "N5",
-        "label": "BUY_NAME",
-        "category": "Names",
-        "path": "/names/buy",
-        "needs_pow": True,
-        "fields": [
-            {"name": "buyerPublicKey", "label": "Buyer Public Key", "auto": "pubkey"},
-            {"name": "name", "label": "Name"},
-            {"name": "seller", "label": "Seller Address", "type": "address"},
-        ],
-    },
-    # Payments
-    {
-        "key": "P1",
-        "label": "PAYMENT",
-        "category": "Payments",
-        "path": "/payments/pay",
-        "needs_pow": False,
-        "fields": [
-            {"name": "senderPublicKey", "label": "Sender Public Key", "auto": "pubkey"},
-            {"name": "recipient", "label": "Recipient Address", "type": "address"},
-            {"name": "amount", "label": "Amount (QORT)", "type": "decimal", "default": Decimal("0")},
-        ],
-    },
-    # Minting
-    {
-        "key": "M1",
-        "label": "REWARD_SHARE",
-        "category": "Minting",
-        "path": "/addresses/rewardshare",
-        "needs_pow": False,
-        "fields": [
-            {"name": "minterPublicKey", "label": "Minter Public Key", "auto": "pubkey"},
-            {"name": "recipient", "label": "Recipient Address", "type": "address", "auto": "address"},
-            {"name": "rewardSharePublicKey", "label": "Reward Share Public Key"},
-            {"name": "sharePercent", "label": "Share Percent (0=self)", "type": "int", "default": 0, "min": 0},
-        ],
-    },
-    # Chat
-    {
-        "key": "C1",
-        "label": "CHAT",
-        "category": "Chat",
-        "path": "/chat",
-        "needs_pow": True,
-        "fields": [
-            {"name": "senderPublicKey", "label": "Sender Public Key", "auto": "pubkey"},
-            {"name": "txGroupId", "label": "Group ID", "type": "int", "default": 0, "min": 0},
-            {"name": "data", "label": "Message (will be Base58 encoded)"},
-        ],
-    },
-]
-
-_CATEGORIES = sorted({tx["category"] for tx in TX_CATALOG})
+@dataclass(frozen=True)
+class Field:
+    name: str
+    label: str
+    kind: str = "text"
+    default: Any = ""
+    minimum: Decimal | int | None = None
+    maximum: Decimal | int | None = None
+    optional: bool = False
+    auto: str | None = None
+    choices: tuple[str, ...] = ()
 
 
-# ---------------------------------------------------------------------------
-# Form builder
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Transaction:
+    key: str
+    code: str
+    label: str
+    description: str
+    category: str
+    path: str
+    fields: tuple[Field, ...]
+    needs_pow: bool = True
 
-def _auto_fill(field: Dict, ctx: AppContext) -> str | None:
-    auto = field.get("auto")
-    if auto == "pubkey":
+
+TX_CATALOG: tuple[Transaction, ...] = (
+    Transaction(
+        "1",
+        "JOIN_GROUP",
+        "Join a group",
+        "Request membership in an open group",
+        "Groups",
+        "/groups/join",
+        (
+            Field("joinerPublicKey", "Joiner public key", auto="public_key"),
+            Field("groupId", "Group ID", "integer", 1, minimum=1),
+        ),
+    ),
+    Transaction(
+        "2",
+        "LEAVE_GROUP",
+        "Leave a group",
+        "End this account's membership",
+        "Groups",
+        "/groups/leave",
+        (
+            Field("leaverPublicKey", "Leaver public key", auto="public_key"),
+            Field("groupId", "Group ID", "integer", 1, minimum=1),
+        ),
+    ),
+    Transaction(
+        "3",
+        "GROUP_INVITE",
+        "Invite a group member",
+        "Send an invitation as a group administrator",
+        "Groups",
+        "/groups/invite",
+        (
+            Field("adminPublicKey", "Administrator public key", auto="public_key"),
+            Field("groupId", "Group ID", "integer", 1, minimum=1),
+            Field("invitee", "Invitee address", "address"),
+            Field("timeToLive", "Invitation lifetime in seconds (0 never expires)", "integer", 0, minimum=0),
+        ),
+    ),
+    Transaction(
+        "4",
+        "CREATE_GROUP",
+        "Create a group",
+        "Create an open or invitation-only group",
+        "Groups",
+        "/groups/create",
+        (
+            Field("creatorPublicKey", "Creator public key", auto="public_key"),
+            Field("groupName", "Group name"),
+            Field("description", "Description"),
+            Field("open", "Open group", "boolean", True),
+            Field(
+                "approvalThreshold",
+                "Approval threshold",
+                default="NONE",
+                choices=("NONE", "ONE", "PCT20", "PCT40", "PCT60", "PCT80", "PCT100"),
+            ),
+            Field("minimumBlockDelay", "Minimum approval delay (blocks)", "integer", 0, minimum=0),
+            Field("maximumBlockDelay", "Maximum approval delay (blocks)", "integer", 1440, minimum=1),
+        ),
+    ),
+    Transaction(
+        "1",
+        "REGISTER_NAME",
+        "Register a name",
+        "Register a new name to this account",
+        "Names",
+        "/names/register",
+        (
+            Field("registrantPublicKey", "Registrant public key", auto="public_key"),
+            Field("name", "Name"),
+            Field("data", "Name data", default="{}"),
+        ),
+    ),
+    Transaction(
+        "2",
+        "UPDATE_NAME",
+        "Update a name",
+        "Rename it, change its data, or both",
+        "Names",
+        "/names/update",
+        (
+            Field("ownerPublicKey", "Owner public key", auto="public_key"),
+            Field("name", "Current name"),
+            Field("newName", "New name (blank keeps current)", optional=True),
+            Field("newData", "New data (blank keeps current)", optional=True),
+        ),
+    ),
+    Transaction(
+        "3",
+        "SELL_NAME",
+        "List a name for sale",
+        "Set the requested sale price",
+        "Names",
+        "/names/sell",
+        (
+            Field("ownerPublicKey", "Owner public key", auto="public_key"),
+            Field("name", "Name"),
+            Field("salePrice", "Sale price (QORT)", "decimal", Decimal("1"), minimum=Decimal("0.00000001")),
+        ),
+    ),
+    Transaction(
+        "4",
+        "CANCEL_SELL_NAME",
+        "Cancel a name sale",
+        "Remove an owned name from sale",
+        "Names",
+        "/names/sell/cancel",
+        (
+            Field("ownerPublicKey", "Owner public key", auto="public_key"),
+            Field("name", "Name"),
+        ),
+    ),
+    Transaction(
+        "5",
+        "BUY_NAME",
+        "Buy a name",
+        "Buy a listed name from its seller",
+        "Names",
+        "/names/buy",
+        (
+            Field("buyerPublicKey", "Buyer public key", auto="public_key"),
+            Field("name", "Name"),
+            Field("amount", "Listed price (QORT)", "decimal", Decimal("1"), minimum=Decimal("0.00000001")),
+            Field("seller", "Seller address", "address"),
+        ),
+    ),
+    Transaction(
+        "1",
+        "PAYMENT",
+        "Send QORT",
+        "Send a QORT payment to an address",
+        "Payments",
+        "/payments/pay",
+        (
+            Field("senderPublicKey", "Sender public key", auto="public_key"),
+            Field("recipient", "Recipient address", "address"),
+            Field("amount", "Amount (QORT)", "decimal", Decimal("1"), minimum=Decimal("0.00000001")),
+        ),
+        needs_pow=False,
+    ),
+)
+
+CATEGORY_ORDER = ("Payments", "Groups", "Names")
+
+
+def _auto_value(field: Field, ctx: AppContext) -> str | None:
+    if field.auto == "public_key":
         from qortium_cli.crypto import to_base58_pubkey
+
         try:
             return to_base58_pubkey(ctx.account.public_key)
         except Exception:
             return None
-    if auto == "address":
-        addr = ctx.account.account_address
-        return addr if not is_placeholder(addr) else None
     return None
 
 
-def _prompt_field(field: Dict, ctx: AppContext) -> Any:
-    auto = _auto_fill(field, ctx)
-    name = field["name"]
-    label = field["label"]
-    ftype = field.get("type", "str")
-    default = field.get("default", "")
+def _prompt_field(field: Field, ctx: AppContext) -> Any:
+    automatic = _auto_value(field, ctx)
+    if automatic is not None:
+        shortened = automatic if len(automatic) <= 36 else f"{automatic[:18]}…{automatic[-10:]}"
+        console.print(f"[qort.dim]{field.label}:[/] [qort.accent]{shortened}[/] [dim](account)[/]")
+        return automatic
 
-    if auto is not None:
-        display = str(auto)[:30] + ("…" if len(str(auto)) > 30 else "")
-        console.print(f"[dim]{label}:[/] [qort.accent]{display}[/] [dim](auto)[/]")
-        return auto
+    if field.kind == "boolean":
+        return prompt_yes_no(field.label, default_yes=bool(field.default))
 
-    if ftype == "int":
-        min_val = field.get("min", 0)
-        default_int = int(default) if default != "" else 0
-        return prompt_int(f"{label} [{default_int}]: ", default=default_int, minimum=min_val)
+    if field.kind == "integer":
+        return prompt_int(
+            f"{field.label} [{field.default}]: ",
+            default=int(field.default),
+            minimum=int(field.minimum or 0),
+        )
 
-    if ftype == "decimal":
-        default_dec = Decimal(str(default)) if default != "" else Decimal("0")
-        return d8(prompt_decimal(f"{label} [{d8(default_dec)}]: ", default=default_dec))
-
-    if ftype == "bool":
-        default_bool = bool(default) if isinstance(default, bool) else True
-        return prompt_yes_no(f"{label}", default_yes=default_bool)
-
-    if ftype == "address":
+    if field.kind == "decimal":
         while True:
-            val = prompt_str(f"{label}: ", str(default)).strip()
-            if not val and default:
-                return default
-            if looks_like_qortal_address(val):
-                return val
-            warn("That doesn't look like a valid Qortium address.")
+            value = prompt_decimal(
+                f"{field.label} [{d8(Decimal(str(field.default)))}]: ",
+                default=Decimal(str(field.default)),
+            )
+            if field.minimum is not None and value < Decimal(str(field.minimum)):
+                warn(f"{field.label} must be at least {field.minimum}.")
+                continue
+            if field.maximum is not None and value > Decimal(str(field.maximum)):
+                warn(f"{field.label} must not exceed {field.maximum}.")
+                continue
+            return d8(value)
 
-    return prompt_str(f"{label} [{default}]: ", str(default)).strip() or str(default)
+    if field.kind == "address":
+        while True:
+            value = prompt_str(f"{field.label}: ").strip()
+            if looks_like_qortal_address(value):
+                return value
+            warn("That does not look like a valid Qortium address.")
+
+    while True:
+        default = str(field.default)
+        suffix = f" [{default}]" if default else ""
+        value = prompt_str(f"{field.label}{suffix}: ", default).strip()
+        if not value and not field.optional:
+            warn(f"{field.label} cannot be blank.")
+            continue
+        if field.choices and value.upper() not in field.choices:
+            warn(f"Choose one of: {', '.join(field.choices)}.")
+            continue
+        return value.upper() if field.choices else value
 
 
-def _build_payload(tx_def: Dict, ctx: AppContext) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {}
-    for field in tx_def["fields"]:
-        value = _prompt_field(field, ctx)
-        payload[field["name"]] = value
+def _validate_payload(transaction: Transaction, payload: dict[str, Any]) -> None:
+    if transaction.code == "CREATE_GROUP":
+        if int(payload["maximumBlockDelay"]) < int(payload["minimumBlockDelay"]):
+            raise ValueError("Maximum approval delay must be at least the minimum delay.")
+    if transaction.code == "UPDATE_NAME":
+        if not str(payload["newName"]).strip() and not str(payload["newData"]).strip():
+            raise ValueError("Enter a new name, new data, or both.")
 
-    # Special handling: CHAT — Base58 encode message data
-    if tx_def["label"] == "CHAT" and "data" in payload:
-        from qortium_cli.crypto import b58encode
-        payload["data"] = b58encode(str(payload["data"]).encode("utf-8"))
-        payload["isText"] = 1
-        payload["isEncrypted"] = 0
 
+def _build_payload(transaction: Transaction, ctx: AppContext) -> dict[str, Any]:
+    payload = {field.name: _prompt_field(field, ctx) for field in transaction.fields}
+    _validate_payload(transaction, payload)
     return payload
 
 
-# ---------------------------------------------------------------------------
-# Transaction runner
-# ---------------------------------------------------------------------------
+def _is_insufficient_fee(exc: Exception) -> bool:
+    return (
+        isinstance(exc, requests.exceptions.HTTPError)
+        and exc.response is not None
+        and "INSUFFICIENT_FEE" in (exc.response.text or "").upper()
+    )
+
+
+def _extract_signature(result: Any) -> str:
+    if isinstance(result, dict):
+        for key in ("signature", "transactionSignature", "sig"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(result, str):
+        value = result.strip()
+        if value and value.lower() not in {"true", "false"}:
+            return value
+    return ""
+
 
 def _run_transaction(
     ctx: AppContext,
-    tx_def: Dict,
-    payload: Dict[str, Any],
+    transaction: Transaction,
+    payload: dict[str, Any],
     fee: str,
     tx_group_id: int,
-    nerd_mode: bool,
 ) -> None:
     from qortium_cli.services import (
-        make_session,
         build_raw_transaction,
         compute_transaction_nonce,
-        sign_tx,
-        process_tx,
-        get_timestamp,
         get_last_reference,
-        is_nonce_or_pow_error,
+        get_recommended_fee,
+        get_timestamp,
+        make_session,
+        process_tx,
+        sign_tx,
     )
-    from qortium_cli.crypto import b58encode
 
-    def _is_insufficient_fee(exc: Exception) -> bool:
-        import requests
-        if not isinstance(exc, requests.exceptions.HTTPError):
-            return False
-        detail = ((exc.response.text if exc.response else "") or "").upper()
-        return "INSUFFICIENT_FEE" in detail
+    with make_session(ctx, include_api_key=True) as session:
+        reference = get_last_reference(ctx, ctx.account.account_address, session)
+        full_payload = {
+            "timestamp": get_timestamp(ctx, session),
+            "reference": reference,
+            "fee": fee,
+            "txGroupId": tx_group_id,
+            **payload,
+        }
 
-    path = tx_def["path"]
-    needs_pow = tx_def["needs_pow"]
-    label = tx_def["label"]
+        fee_retried = False
+        while True:
+            with TxPipeline(transaction.code).run() as pipeline:
+                pipeline.start(0)
+                unsigned = build_raw_transaction(ctx, transaction.path, full_payload, session)
+                pipeline.finish(0)
 
-    with TxPipeline(label).run() as pipeline:
-        # Step 1: Build
-        pipeline.start(0)
-        with make_session(ctx, include_api_key=True) as session:
-            timestamp = get_timestamp(ctx, session)
-            try:
-                reference = get_last_reference(ctx, ctx.account.account_address, session)
-            except RuntimeError:
-                reference = b58encode(bytes(64))
+                pipeline.start(1)
+                if transaction.needs_pow:
+                    unsigned, _ = compute_transaction_nonce(ctx, unsigned, session)
+                pipeline.finish(1)
 
-            full_payload = {
-                "timestamp": timestamp,
-                "reference": reference,
-                "fee": fee,
-                "txGroupId": tx_group_id,
-                **payload,
-            }
+                pipeline.start(2)
+                signed = sign_tx(ctx, unsigned, session)
+                pipeline.finish(2)
 
-            if nerd_mode:
-                console.print()
-                json_panel(full_payload, "Payload")
+                pipeline.start(3)
+                try:
+                    result = process_tx(ctx, signed, session)
+                except Exception as exc:
+                    pipeline.finish(3, ok=False)
+                    if fee_retried or not _is_insufficient_fee(exc):
+                        raise
+                    recommended = get_recommended_fee(ctx, unsigned, session)
+                    if recommended <= Decimal(str(full_payload["fee"])):
+                        raise
+                    full_payload["fee"] = d8(recommended)
+                    fee_retried = True
+                    warn(f"Node requires a fee. Retrying with {d8(recommended)} QORT.")
+                    continue
+                pipeline.finish(3)
+            break
 
-            unsigned_tx = build_raw_transaction(ctx, path, full_payload, session)
-        pipeline.finish(0)
-
-        if nerd_mode:
-            console.print(f"\n[dim]Unsigned bytes:[/] [qort.muted]{str(unsigned_tx)[:80]}…[/]")
-
-        # Step 2: PoW
-        pipeline.start(1)
-        if needs_pow:
-            with make_session(ctx, include_api_key=True) as session:
-                unsigned_tx, nonce_path = compute_transaction_nonce(ctx, unsigned_tx, session)
-        pipeline.finish(1)
-
-        # Step 3: Sign
-        pipeline.start(2)
-        with make_session(ctx, include_api_key=True) as session:
-            signed_tx = sign_tx(ctx, unsigned_tx, session)
-        pipeline.finish(2)
-
-        if nerd_mode:
-            console.print(f"\n[dim]Signed bytes:[/] [qort.muted]{str(signed_tx)[:80]}…[/]")
-
-        # Step 4: Broadcast
-        pipeline.start(3)
-        with make_session(ctx, include_api_key=True) as session:
-            result = process_tx(ctx, signed_tx, session)
-        pipeline.finish(3)
-
-    # Extract signature
-    sig = ""
-    if isinstance(result, dict):
-        sig = str(result.get("signature", result.get("transactionSignature", "")) or "")
-    elif isinstance(result, str) and len(result) > 10:
-        sig = result.strip()
-
-    ok_panel(f"Transaction submitted{chr(10)}TX: {sig}" if sig else "Transaction submitted.", title="✓ Success")
-
-    if nerd_mode and result:
-        json_panel(result if isinstance(result, dict) else {"result": str(result)}, "Node Response")
+    signature = _extract_signature(result)
+    message = "Transaction submitted."
+    if signature:
+        message += f"\nSignature: {signature}"
+    ok_panel(message)
+    if ctx.debug:
+        json_panel(result if isinstance(result, dict) else {"result": str(result)}, "Node response")
 
 
-# ---------------------------------------------------------------------------
-# TX Hub main entry
-# ---------------------------------------------------------------------------
+def _account_is_ready(ctx: AppContext) -> bool:
+    return not any(
+        is_placeholder(value)
+        for value in (
+            ctx.account.account_address,
+            ctx.account.public_key,
+            ctx.account.private_key,
+            ctx.account.api_key,
+        )
+    )
+
+
+def _choose_category(ctx: AppContext) -> str | None:
+    render_header(
+        ctx,
+        "Guided Transaction Builder",
+        "Home  >  Advanced Tools  >  Transactions",
+    )
+    console.print(
+        "[#b9afd4]Advanced guided forms for supported transaction types. "
+        "Everyday chat, group, name, and wallet tasks also have dedicated screens.[/]\n"
+    )
+    options = tuple(
+        MenuOption(
+            str(index),
+            category,
+            f"{sum(item.category == category for item in TX_CATALOG)} supported actions",
+            lambda _: None,
+        )
+        for index, category in enumerate(CATEGORY_ORDER, start=1)
+    )
+    render_options(options, zero_description="Return to Advanced Tools")
+    choice = read_menu_choice("\nChoose: ").strip()
+    if choice == "0":
+        return None
+    try:
+        index = int(choice) - 1
+        if index < 0:
+            raise IndexError
+        return CATEGORY_ORDER[index]
+    except (ValueError, IndexError):
+        warn("That number is not available here.")
+        pause()
+        return ""
+
+
+def _choose_transaction(ctx: AppContext, category: str) -> Transaction | None:
+    transactions = tuple(item for item in TX_CATALOG if item.category == category)
+    render_header(
+        ctx,
+        f"{category} Transactions",
+        f"Home  >  Advanced Tools  >  Transactions  >  {category}",
+    )
+    options = tuple(
+        MenuOption(item.key, item.label, f"{item.description} · {item.code}", lambda _: None)
+        for item in transactions
+    )
+    render_options(options, zero_description="Return to transaction categories")
+    choice = read_menu_choice("\nChoose: ").strip()
+    if choice == "0":
+        return None
+    selected = next((item for item in transactions if item.key == choice), None)
+    if selected is None:
+        warn("That number is not available here.")
+        pause()
+    return selected
+
 
 def tool_tx_hub(ctx: AppContext) -> None:
-    if is_placeholder(ctx.account.private_key) or is_placeholder(ctx.account.api_key):
-        error_panel("Wallet not configured. Run reconfigure first.", hint="Press 9 from main menu to reconfigure.")
+    if not _account_is_ready(ctx):
+        error_panel(
+            "The active account is not ready to sign transactions.",
+            hint="Open Settings from the main menu and configure the account and node API key.",
+        )
         pause()
         return
 
-    nerd_mode = False
     while True:
-        print_banner(ctx.endpoint.base_url, "TX Hub")
-        tool_header("Universal TX Hub", "✦")
-
-        console.print("[qort.dim]Build, sign, and broadcast any transaction type.[/]")
-        console.print("[qort.dim]Auto-fills your public key, address, timestamp, and fee=0.[/]\n")
-
-        # Category menu
-        console.print("[qort.heading]Categories:[/]")
-        for i, cat in enumerate(_CATEGORIES, start=1):
-            txs_in_cat = [tx for tx in TX_CATALOG if tx["category"] == cat]
-            console.print(f"  [qort.key]{i})[/] [white]{cat}[/] [dim]({len(txs_in_cat)} types)[/]")
-        nerd_label = "[bold yellow]⚡ ON[/]" if nerd_mode else "[dim]off[/]"
-        console.print(f"  [qort.key]N)[/] [dim]Nerd mode[/] {nerd_label}")
-        console.print(f"  [qort.key]0)[/] [dim]Back[/]")
-        console.print()
-
-        choice = read_menu_choice("").upper()
-        if choice == "0":
+        category = _choose_category(ctx)
+        if category is None:
             return
-
-        if choice == "N":
-            nerd_mode = not nerd_mode
-            state = "⚡ ON — raw bytes and full JSON will be shown." if nerd_mode else "off."
-            console.print(f"[qort.warn]Nerd mode {state}[/]\n")
+        if not category:
             continue
+
+        transaction = _choose_transaction(ctx, category)
+        if transaction is None:
+            continue
+
+        render_header(
+            ctx,
+            transaction.label,
+            f"Home  >  Advanced Tools  >  Transactions  >  {category}  >  {transaction.label}",
+        )
+        console.print(f"[qort.dim]{transaction.description}[/]")
+        console.print(f"[qort.dim]Core builder: POST {transaction.path}[/]\n")
 
         try:
-            cat_idx = int(choice) - 1
-            if cat_idx < 0 or cat_idx >= len(_CATEGORIES):
-                warn("Unknown option.")
-                pause()
-                continue
-            selected_category = _CATEGORIES[cat_idx]
-        except ValueError:
-            if choice != "N":
-                warn("Unknown option.")
-                pause()
-            continue
-
-        # TX type menu within category
-        cat_txs = [tx for tx in TX_CATALOG if tx["category"] == selected_category]
-        console.print(f"\n[qort.heading]{selected_category} Transactions:[/]")
-        for j, tx in enumerate(cat_txs, start=1):
-            pow_label = "[dim](PoW)[/]" if tx["needs_pow"] else ""
-            console.print(f"  [qort.key]{j})[/] [white]{tx['label']}[/] {pow_label}")
-        console.print(f"  [qort.key]0)[/] [dim]Back[/]")
-        console.print()
-
-        tx_choice = read_menu_choice("")
-        if tx_choice == "0":
-            continue
-        try:
-            tx_idx = int(tx_choice) - 1
-            if tx_idx < 0 or tx_idx >= len(cat_txs):
-                warn("Unknown option.")
-                pause()
-                continue
-            tx_def = cat_txs[tx_idx]
-        except ValueError:
-            warn("Unknown option.")
+            payload = _build_payload(transaction, ctx)
+            fee = d8(prompt_decimal("Fee [0.00000000]: ", default=Decimal("0")))
+            tx_group_id = prompt_int("Transaction group ID [0]: ", default=0, minimum=0)
+        except (KeyboardInterrupt, ValueError) as exc:
+            warn(str(exc) or "Transaction cancelled.")
             pause()
             continue
 
-        # Field collection
-        console.print(f"\n[qort.heading]Build: {tx_def['label']}[/]")
-        if tx_def.get("needs_pow"):
-            console.print("[qort.warn]This transaction requires PoW computation (may take 5-60s).[/]")
+        preview = {
+            "type": transaction.code,
+            "endpoint": transaction.path,
+            **payload,
+            "fee": fee,
+            "txGroupId": tx_group_id,
+        }
         console.print()
+        json_panel(preview, "Review transaction")
+        if not prompt_yes_no("\nSign and submit this transaction?", default_yes=False):
+            warn("Transaction cancelled.")
+            pause()
+            continue
 
         try:
-            payload = _build_payload(tx_def, ctx)
+            _run_transaction(ctx, transaction, payload, fee, tx_group_id)
         except KeyboardInterrupt:
-            warn("Cancelled.")
-            pause()
-            continue
-
-        # Common fields
-        console.print()
-        fee = d8(prompt_decimal("Fee [0.00000000]: ", default=Decimal("0")))
-        tx_group_id = prompt_int("txGroupId [0]: ", default=0, minimum=0)
-
-        # Confirm
-        console.print()
-        json_panel({**payload, "fee": fee, "txGroupId": tx_group_id}, "Transaction Preview")
-        if not prompt_yes_no("\nSubmit this transaction?", default_yes=False):
-            warn("Cancelled.")
-            pause()
-            continue
-
-        console.print()
-        try:
-            _run_transaction(ctx, tx_def, payload, fee, tx_group_id, nerd_mode)
-        except KeyboardInterrupt:
-            warn_panel("Transaction cancelled by user.")
+            warn("Transaction cancelled.")
         except Exception as exc:
-            error_panel(pretty_exception(exc), hint="Check node connection and API key.")
-
+            error_panel(
+                pretty_exception(exc),
+                hint="No transaction was reported as submitted. Check the account, node, and entered values.",
+            )
         pause()

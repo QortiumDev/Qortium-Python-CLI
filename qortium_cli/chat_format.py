@@ -81,6 +81,63 @@ DEFAULT_REACTION_OPTIONS = tuple(
 DEFAULT_REACTION_ORDER = {
     reaction: index for index, reaction in enumerate(DEFAULT_REACTION_OPTIONS)
 }
+TERMINAL_REACTION_LABELS = {
+    "\U0001f44d": "+1",
+    "\u2764\ufe0f": "<3",
+    "\U0001f602": "XD",
+    "\U0001f62e": ":-O",
+    "\U0001f622": ":'-(",
+    "\U0001f64f": "_/\\_",
+    "\U0001f600": ":-D",
+    "\U0001f604": ":-D",
+    "\U0001f60a": ":-)",
+    "\U0001f60e": "B-)",
+    "\U0001f914": ":-?",
+    "\U0001f60d": "<3",
+    "\U0001f62d": ":''-(",
+    "\U0001f621": ">:-(",
+    "\U0001f44e": "-1",
+    "\U0001f44f": "*clap*",
+    "\U0001f64c": "\\o/",
+    "\U0001f4aa": "[strong]",
+    "\U0001f91d": "[deal]",
+    "\U0001f440": "O_O",
+    "\U0001faf6": "<3",
+    "\U0001f91e": "[fingers-crossed]",
+    "\U0001f9e1": "[orange-heart]",
+    "\U0001f49b": "[yellow-heart]",
+    "\U0001f49a": "[green-heart]",
+    "\U0001f499": "[blue-heart]",
+    "\U0001f49c": "[purple-heart]",
+    "\U0001f5a4": "[black-heart]",
+    "\U0001f90d": "[white-heart]",
+    "\U0001f494": "</3",
+    "\u2705": "[OK]",
+    "\u274c": "[X]",
+    "\U0001f4af": "100%",
+    "\u2b50": "*",
+    "\U0001f525": "[fire]",
+    "\U0001f389": "*party*",
+    "\U0001f680": "[launch]",
+    "\U0001f4a1": "[idea]",
+}
+
+
+def terminal_reaction(content: str) -> str:
+    """Return an ASCII label that remains readable in text-only terminals."""
+
+    normalized = str(content or "").strip()
+    if normalized in TERMINAL_REACTION_LABELS:
+        return TERMINAL_REACTION_LABELS[normalized]
+    if normalized and normalized.isascii():
+        return normalized
+
+    codepoints = [
+        f"U+{ord(character):04X}"
+        for character in normalized
+        if ord(character) not in {0xFE0E, 0xFE0F, 0x200D}
+    ]
+    return f"[{' '.join(codepoints)}]" if codepoints else "[reaction]"
 
 
 @dataclass(frozen=True)
@@ -283,7 +340,7 @@ def build_chat_message_text(text: str, replied_to: str | None = None) -> str:
 def build_reaction_message_text(content: str, content_state: bool) -> str:
     normalized_content = _normalize_reaction_content(content)
     if not normalized_content:
-        raise ValueError("Reaction content must be a short emoji string.")
+        raise ValueError("Reaction content must be a short string.")
     return json.dumps(
         {
             "message": "",

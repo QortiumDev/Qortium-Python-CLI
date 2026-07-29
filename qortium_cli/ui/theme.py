@@ -78,6 +78,7 @@ console = Console(
     theme=QORT_THEME,
     highlight=False,
     legacy_windows=False,
+    record=True,
 )
 err_console = Console(
     file=_utf8_stderr(),  # type: ignore[arg-type]

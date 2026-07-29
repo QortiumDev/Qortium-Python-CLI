@@ -15,13 +15,8 @@ command -v pyinstaller >/dev/null 2>&1 || {
   exit 1
 }
 
-pyinstaller \
-  --noconfirm \
-  --clean \
-  --onefile \
-  --name qortium-cli \
-  main.py
+python3 scripts/build_binary.py
 
 echo
 echo "Build complete:"
-echo "  $ROOT_DIR/dist/qortium-cli"
+echo "  $ROOT_DIR/dist/qortium-cli-linux"

@@ -18,7 +18,7 @@ from qortium_cli.constants import (
     NONCE_ERROR_MARKERS,
 )
 from qortium_cli.models import AppContext
-from qortium_cli.validators import is_placeholder
+from qortium_cli.validators import is_placeholder, normalize_api_key
 
 
 class ApiRequestError(RuntimeError):
@@ -47,7 +47,7 @@ def parse_api_key_response(response: requests.Response) -> str:
 def generate_api_key_via_node(base_url: str, timeout_seconds: int, existing_api_key: str = "") -> str:
     headers = {"Accept": "application/json,text/plain"}
     if existing_api_key:
-        headers["X-API-KEY"] = existing_api_key
+        headers["X-API-KEY"] = normalize_api_key(existing_api_key)
 
     response = requests.post(
         f"{base_url}/admin/apikey/generate",
@@ -61,7 +61,26 @@ def generate_api_key_via_node(base_url: str, timeout_seconds: int, existing_api_
     api_key = parse_api_key_response(response)
     if not api_key:
         raise RuntimeError("/admin/apikey/generate returned an empty API key.")
-    return api_key
+    return normalize_api_key(api_key)
+
+
+def test_api_key_via_node(base_url: str, api_key: str, timeout_seconds: int) -> bool:
+    """Return whether Core accepts the candidate API key."""
+
+    try:
+        response = requests.get(
+            f"{base_url.rstrip('/')}/admin/apikey/test",
+            headers={
+                "X-API-KEY": normalize_api_key(api_key),
+                "Accept": "text/plain",
+            },
+            timeout=min(max(1, int(timeout_seconds)), 5),
+        )
+        if response.status_code >= 400:
+            return False
+        return (response.text or "").strip().lower() == "true"
+    except (ValueError, requests.RequestException):
+        return False
 
 
 def check_node_connection(base_url: str, timeout_seconds: int) -> tuple[bool, str]:
@@ -147,7 +166,7 @@ def make_session(ctx: AppContext, include_api_key: bool = True) -> requests.Sess
     }
     api_key = (ctx.account.api_key or "").strip()
     if include_api_key and not is_placeholder(api_key):
-        headers["X-API-KEY"] = api_key
+        headers["X-API-KEY"] = normalize_api_key(api_key)
     session.headers.update(headers)
     return session
 
@@ -389,6 +408,25 @@ def get_group_info(
     if isinstance(data, dict):
         return data
     return {}
+
+
+def get_member_groups(
+    ctx: AppContext,
+    address: str,
+    session: requests.Session,
+) -> List[Dict[str, Any]]:
+    """Return groups the address can select as a chat context."""
+
+    safe_address = quote(str(address or "").strip(), safe="")
+    response = session.get(
+        build_api_url(ctx, f"/groups/member/{safe_address}"),
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, list):
+        return []
+    return [row for row in data if isinstance(row, dict)]
 
 
 def get_group_invites(
@@ -1045,16 +1083,23 @@ def get_chat_messages(
     offset: int = 0,
     reverse: bool = True,
     encoding: str = "BASE64",
+    before: int | None = None,
+    after: int | None = None,
 ) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "txGroupId": tx_group_id,
+        "encoding": encoding,
+        "limit": max(1, int(limit)),
+        "offset": max(0, int(offset)),
+        "reverse": str(bool(reverse)).lower(),
+    }
+    if before is not None:
+        params["before"] = int(before)
+    if after is not None:
+        params["after"] = int(after)
     response = session.get(
         build_api_url(ctx, "/chat/messages"),
-        params={
-            "txGroupId": tx_group_id,
-            "encoding": encoding,
-            "limit": max(1, int(limit)),
-            "offset": max(0, int(offset)),
-            "reverse": str(bool(reverse)).lower(),
-        },
+        params=params,
         timeout=ctx.endpoint.timeout_seconds,
     )
     response.raise_for_status()
@@ -1065,6 +1110,175 @@ def get_chat_messages(
     return []
 
 
+
+
+def get_active_chats(
+    ctx: AppContext,
+    session: requests.Session,
+    address: str,
+    *,
+    encoding: str = "BASE64",
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Return ordinary public/group and direct conversation summaries."""
+
+    safe_address = quote(str(address or "").strip(), safe="")
+    response = session.get(
+        build_api_url(ctx, f"/chat/active/{safe_address}"),
+        params={"encoding": encoding},
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        return {"groups": [], "direct": []}
+    return {
+        "groups": [row for row in data.get("groups", []) if isinstance(row, dict)],
+        "direct": [row for row in data.get("direct", []) if isinstance(row, dict)],
+    }
+
+
+def get_direct_private_active_chats(
+    ctx: AppContext,
+    session: requests.Session,
+    private_key: str,
+) -> List[Dict[str, Any]]:
+    response = session.post(
+        build_api_url(ctx, "/chat/private/direct/active"),
+        json={"accountPrivateKey": str(private_key), "encoding": "BASE64"},
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+
+
+def get_direct_private_chat_messages(
+    ctx: AppContext,
+    session: requests.Session,
+    private_key: str,
+    other_address: str,
+    *,
+    limit: int = 60,
+    before: int | None = None,
+    after: int | None = None,
+) -> List[Dict[str, Any]]:
+    payload: Dict[str, Any] = {
+        "accountPrivateKey": str(private_key),
+        "otherAddress": str(other_address),
+        "encoding": "BASE64",
+        "limit": max(1, int(limit)),
+        "reverse": True,
+    }
+    if before is not None:
+        payload["before"] = int(before)
+    if after is not None:
+        payload["after"] = int(after)
+    response = session.post(
+        build_api_url(ctx, "/chat/private/direct/messages"),
+        json=payload,
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+
+
+def send_direct_private_chat(
+    ctx: AppContext,
+    session: requests.Session,
+    private_key: str,
+    recipient: str,
+    data_base58: str,
+    *,
+    chat_reference: str = "",
+) -> Any:
+    payload: Dict[str, Any] = {
+        "senderPrivateKey": str(private_key),
+        "recipient": str(recipient),
+        "data": str(data_base58),
+        "isText": True,
+    }
+    if chat_reference:
+        payload["chatReference"] = str(chat_reference)
+    return request_json(
+        ctx,
+        session,
+        "POST",
+        "/chat/private/direct/send",
+        json=payload,
+    )
+
+
+def get_private_group_active_chats(
+    ctx: AppContext,
+    session: requests.Session,
+    private_key: str,
+) -> List[Dict[str, Any]]:
+    response = session.post(
+        build_api_url(ctx, "/chat/private/group/active"),
+        json={"recipientPrivateKey": str(private_key), "encoding": "BASE64"},
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+
+
+def get_private_group_chat_messages(
+    ctx: AppContext,
+    session: requests.Session,
+    private_key: str,
+    group_id: int,
+    *,
+    limit: int = 60,
+    before: int | None = None,
+    after: int | None = None,
+) -> List[Dict[str, Any]]:
+    payload: Dict[str, Any] = {
+        "recipientPrivateKey": str(private_key),
+        "groupId": int(group_id),
+        "encoding": "BASE64",
+        "limit": max(1, int(limit)),
+        "reverse": True,
+    }
+    if before is not None:
+        payload["before"] = int(before)
+    if after is not None:
+        payload["after"] = int(after)
+    response = session.post(
+        build_api_url(ctx, "/chat/private/group/messages"),
+        json=payload,
+        timeout=ctx.endpoint.timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+
+
+def send_private_group_chat(
+    ctx: AppContext,
+    session: requests.Session,
+    private_key: str,
+    group_id: int,
+    data_base58: str,
+    *,
+    chat_reference: str = "",
+) -> Any:
+    payload: Dict[str, Any] = {
+        "senderPrivateKey": str(private_key),
+        "groupId": int(group_id),
+        "data": str(data_base58),
+        "isText": True,
+    }
+    if chat_reference:
+        payload["chatReference"] = str(chat_reference)
+    return request_json(
+        ctx,
+        session,
+        "POST",
+        "/chat/private/group/send",
+        json=payload,
+    )
 
 
 def get_unconfirmed_chat_messages(
