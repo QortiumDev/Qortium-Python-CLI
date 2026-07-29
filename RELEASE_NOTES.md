@@ -8,7 +8,7 @@ The first production release of the workflow-focused Qortium command-line client
 - Full-screen terminal chat with public groups, encrypted direct messages, encrypted private groups, replies, edits, and a deliberate reaction picker.
 - Terminal-friendly reaction labels such as `+1`, `<3`, `XD`, and `:-)` while preserving Qortium-compatible Unicode reaction payloads.
 - Combined QORT and external-wallet portfolio with balances, fiat prices, public wallet information, and transaction history.
-- QDN browsing, downloading, APP publishing, ownership checks, and local or on-chain deletion workflows.
+- QDN file exploring, downloading, APP publishing, ownership checks, and local or on-chain deletion workflows.
 - Guided transaction builder aligned with current Qortium Core endpoints.
 - Local Qortium Core detection, verified API-key synchronization, encrypted Qortium Home wallet import/export, and safer secret entry.
 - Configurable motion effects, faster startup reveal, responsive narrow-terminal layouts, and non-interactive fallbacks.
