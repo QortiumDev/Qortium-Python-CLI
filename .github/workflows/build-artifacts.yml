@@ -34,11 +34,6 @@ jobs:
             path: dist/qortium-cli-macos
             binary: qortium-cli-macos
             archive: dist/qortium-cli-macos-arm64.tar.gz
-          - os: macos-15-intel
-            artifact: qortium-cli-macos-x86_64
-            path: dist/qortium-cli-macos
-            binary: qortium-cli-macos
-            archive: dist/qortium-cli-macos-x86_64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout

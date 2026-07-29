@@ -200,8 +200,8 @@ Output names are platform-specific:
 - `qortium-cli-macos`
 - `qortium-cli-linux`
 
-GitHub Actions tests the project and builds Windows, Linux, and both Apple
-Silicon and Intel macOS artifacts.
+GitHub Actions tests the project and builds Windows x86-64, Linux x86-64, and
+Apple Silicon macOS artifacts.
 Pushing a `v*` tag publishes them together in a GitHub release only after the
 test and build jobs succeed.
 

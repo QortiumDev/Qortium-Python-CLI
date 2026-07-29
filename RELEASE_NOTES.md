@@ -18,7 +18,6 @@ The first production release of the workflow-focused Qortium command-line client
 - Windows x86-64: `qortium-cli-windows-x86_64.zip`
 - Linux x86-64: `qortium-cli-linux-x86_64.tar.gz`
 - macOS Apple Silicon: `qortium-cli-macos-arm64.tar.gz`
-- macOS Intel: `qortium-cli-macos-x86_64.tar.gz`
 
 Every platform executable is built natively and must pass `--self-check` before the release is published. Verify downloads with `SHA256SUMS.txt`.
 
